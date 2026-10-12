@@ -1,0 +1,335 @@
+import Darwin
+import Foundation
+
+actor NativeBroker {
+  let context: NativeContext
+  let supervisor = ChildSupervisor()
+  let runtime: RuntimeSupport
+  let approvals: LocalApprovals
+  let safety: CommandSafety
+  let github: NativeGitHub
+  let providers: NativeProviders
+  var desktop: NativeDesktop?
+  var computerAllowed = false
+  let tools: [JSONObject]
+  init(_ context: NativeContext) throws {
+    self.context = context
+    runtime = try RuntimeSupport(context, supervisor)
+    approvals = LocalApprovals(context)
+    safety = try CommandSafety(context, supervisor, approvals)
+    github = NativeGitHub(runtime, approvals)
+    providers = NativeProviders(runtime, approvals)
+    guard
+      let tools = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: NativeResources.directory.appendingPathComponent("Tools.json")))
+        as? [JSONObject]
+    else { throw SideportError("Bundled tool manifest is missing") }
+    self.tools = tools
+  }
+  func call(_ name: String, _ args: JSONObject) async throws -> JSONObject {
+    guard tools.contains(where: { $0["name"] as? String == name }) else {
+      throw SideportError("Unknown tool")
+    }
+    switch name {
+    case "allowed_locations": return textResult(try context.grants().map(\.dictionary))
+    case "request_access":
+      return try await approvals.access(
+        canonical(NativeDesktop.string(args, "path"), existing: true),
+        NativeDesktop.string(args, "access"), NativeDesktop.string(args, "reason", maximum: 500))
+    case "read_file", "write_file", "list_directory":
+      let path = try canonical(NativeDesktop.string(args, "path"), existing: name != "write_file")
+      let grants = try context.grants()
+      let access = name == "write_file" ? "read_write" : "read"
+      guard context.permitted(path, access, grants) else {
+        return textResult(
+          [
+            "status": "access_denied", "path": path, "access": access,
+            "hint": "Decide whether to request_access for the required location",
+          ], error: true)
+      }
+      let content = args["content"] as? String ?? ""
+      guard name != "write_file" || (args["content"] is String && content.utf8.count <= 524288)
+      else { throw SideportError("Provide UTF-8 content up to 512 KiB") }
+      let output = try await runtime.launchProfile(
+        runtime.profile(grants), context.executable, ["--file-operation", name, path],
+        cwd: runtime.scratch, timeout: 10, input: Data(content.utf8))
+      guard output.code == 0, !output.stopped else {
+        throw SideportError("File operation refused by the operating-system sandbox")
+      }
+      return try jsonObject(output.stdout)
+    case "run_shell", "run_github":
+      let cwd = try canonical(NativeDesktop.string(args, "cwd"), existing: true)
+      let grants = try context.grants()
+      guard context.permitted(cwd, "read", grants) else {
+        return textResult(
+          [
+            "status": "access_denied", "path": cwd,
+            "hint": "Request access to the working folder if appropriate",
+          ], error: true)
+      }
+      if name == "run_github" { return try await github.call(args, cwd: cwd, grants: grants) }
+      let command = try NativeDesktop.string(args, "command", maximum: 65536)
+      if let words = try GitHubPlan.simple(command) {
+        var forwarded = args
+        forwarded["args"] = words
+        return try await github.call(forwarded, cwd: cwd, grants: grants)
+      }
+      let verdict = try await safety.assess(
+        command, cwd: cwd, reason: args["approval_reason"] as? String,
+        task: args["task_context"] as? String, scope: grants)
+      guard verdict["allowed"] as? Bool == true else { return textResult(verdict, error: true) }
+      let timeout = args["timeout_seconds"] as? Double ?? 30
+      guard (1...300).contains(timeout) else { throw SideportError("Invalid command timeout") }
+      let output = try await runtime.execute(
+        "/bin/bash", ["--noprofile", "--norc", "-c", command], cwd: cwd, approved: grants,
+        network: true, timeout: timeout
+      )
+      await safety.record([
+        "tool": "run_shell", "command": String(command.prefix(500)), "cwd": cwd,
+        "exit_code": output.code, "at": ISO8601DateFormatter().string(from: Date()),
+      ])
+      return output.result
+    case "request_computer_control":
+      if !computerAllowed {
+        guard
+          try await approvals.capability(
+            "computer_control", ["tool": "Peekaboo", "version": "4.9.1"],
+            NativeDesktop.string(args, "reason", maximum: 500))
+        else { return textResult(["status": "denied"]) }
+        desktop = await MainActor.run { NativeDesktop() }
+        computerAllowed = true
+      }
+      return textResult([
+        "status": "approved", "tools": Self.computerTools,
+        "guidance":
+          "Use screen control for graphical tasks. Use run_shell for commands; never bypass a sandbox refusal with Terminal.",
+      ])
+    case "computer_action":
+      guard computerAllowed, let desktop, let arguments = args["arguments"] as? JSONObject else {
+        return textResult(
+          ["status": "access_denied", "hint": "Request computer control if appropriate"],
+          error: true)
+      }
+      return try await desktop.call(NativeDesktop.string(args, "tool"), arguments)
+    default: return try await providers.call(name, args)
+    }
+  }
+  func message(_ object: JSONObject) async -> JSONObject? {
+    let id = object["id"]
+    guard let method = object["method"] as? String else {
+      return id.map {
+        ["jsonrpc": "2.0", "id": $0, "error": ["code": -32600, "message": "Invalid request"]]
+      }
+    }
+    guard id != nil else { return nil }
+    let params = object["params"] as? JSONObject ?? [:]
+    do {
+      let result: JSONObject
+      switch method {
+      case "server/discover":
+        result = [
+          "supportedVersions": ["2026-07-28", "2025-11-25"],
+          "serverInfo": ["name": "Sideport", "version": "0.3.0"], "capabilities": ["tools": [:]],
+        ]
+      case "initialize":
+        let requested = params["protocolVersion"] as? String ?? ""
+        result = [
+          "protocolVersion": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+            .contains(requested) ? requested : "2025-11-25",
+          "serverInfo": ["name": "Sideport", "version": "0.3.0"], "capabilities": ["tools": [:]],
+        ]
+      case "ping": result = [:]
+      case "tools/list": result = ["tools": tools]
+      case "tools/call":
+        do {
+          result = try await call(
+            NativeDesktop.string(params, "name"), params["arguments"] as? JSONObject ?? [:])
+        } catch {
+          result = textResult(["error": secretRedacted(error.localizedDescription)], error: true)
+        }
+      default: throw RPCFailure(code: -32601, message: "Method not found")
+      }
+      return ["jsonrpc": "2.0", "id": id!, "result": result]
+    } catch {
+      return [
+        "jsonrpc": "2.0", "id": id!,
+        "error": [
+          "code": (error as? RPCFailure)?.code ?? -32602,
+          "message": secretRedacted(error.localizedDescription),
+        ],
+      ]
+    }
+  }
+  func close() async {
+    await providers.close()
+    supervisor.stopAll()
+    runtime.close()
+    computerAllowed = false
+    desktop = nil
+  }
+  nonisolated static var computerTools: [JSONObject] {
+    let string: JSONObject = ["type": "string"]
+    func schema(
+      _ name: String, _ description: String, _ properties: JSONObject, _ required: [String] = []
+    ) -> JSONObject {
+      [
+        "name": name, "description": description,
+        "inputSchema": [
+          "type": "object", "properties": properties, "required": required,
+          "additionalProperties": false,
+        ],
+      ]
+    }
+    let snapshot: JSONObject = ["snapshot_id": string, "target": string]
+    return [
+      schema(
+        "window", "List or manage app windows; mutations require a fresh snapshot_id",
+        [
+          "action": string, "app": string, "snapshot_id": string, "x": ["type": "number"],
+          "y": ["type": "number"], "width": ["type": "number"], "height": ["type": "number"],
+        ]),
+      schema(
+        "menu", "List or select application menus and menu extras",
+        ["action": string, "app": string, "path": string, "title": string]),
+      schema(
+        "dock", "List or interact with Dock items",
+        ["action": string, "app": string, "item": string]),
+      schema(
+        "dialog", "Inspect a dialog or act on one of its fresh element selectors",
+        [
+          "action": string, "title": string, "app": string, "snapshot_id": string, "target": string,
+          "text": string,
+        ]),
+      schema(
+        "move", "Move the pointer to a fresh selected element", snapshot, ["snapshot_id", "target"]),
+      schema(
+        "space", "List, switch or move a window to a Space",
+        ["action": string, "id": ["type": "integer"], "snapshot_id": string]),
+      schema(
+        "image", "Capture an image of a screen or window inline",
+        [
+          "app": string, "window_id": ["type": "integer"],
+          "target": ["type": "string", "enum": ["window", "screen"]],
+          "display_index": ["type": "integer", "minimum": 0],
+        ]),
+      schema("permissions", "Check macOS automation permissions", [:]),
+      schema(
+        "see", "Observe an app window; returns pixels, elements and a fresh snapshot_id",
+        [
+          "app": string, "window_id": ["type": "integer"],
+          "target": ["type": "string", "enum": ["window", "screen"]],
+          "display_index": ["type": "integer", "minimum": 0],
+        ]),
+      schema(
+        "inspect_ui", "Observe the target window’s accessibility tree and screenshot",
+        [
+          "app": string, "window_id": ["type": "integer"],
+          "target": ["type": "string", "enum": ["window", "screen"]],
+          "display_index": ["type": "integer", "minimum": 0],
+        ]),
+      schema(
+        "capture", "Capture the current window",
+        [
+          "app": string, "window_id": ["type": "integer"],
+          "target": ["type": "string", "enum": ["window", "screen"]],
+          "display_index": ["type": "integer", "minimum": 0],
+        ]),
+      schema(
+        "verify_state", "Read the current screen after an action",
+        [
+          "app": string, "window_id": ["type": "integer"],
+          "target": ["type": "string", "enum": ["window", "screen"]],
+          "display_index": ["type": "integer", "minimum": 0],
+        ]),
+      schema(
+        "click", "Click one element from the latest snapshot",
+        snapshot.merging(["click_type": ["type": "string", "enum": ["single", "double", "right"]]])
+        { _, new in new }, ["snapshot_id", "target"]),
+      schema(
+        "type", "Type into a selected element",
+        snapshot.merging(["text": string, "clear": ["type": "boolean"]]) { _, new in new },
+        ["snapshot_id", "target", "text"]),
+      schema(
+        "set_value", "Set an accessibility control value",
+        snapshot.merging(["value": string]) { _, new in new }, ["snapshot_id", "target", "value"]),
+      schema(
+        "select_text", "Select text inside an element",
+        snapshot.merging(["text": string, "prefix": string, "suffix": string]) { _, new in new },
+        ["snapshot_id", "target", "text"]),
+      schema(
+        "drag",
+        "Drag between two unique element selectors in the same fresh window; coordinates forbidden",
+        [
+          "snapshot_id": string, "from": string, "to": string,
+          "duration_ms": ["type": "integer", "minimum": 1, "maximum": 10000],
+        ], ["snapshot_id", "from", "to"]),
+      schema(
+        "press", "Press a key combination in the observed window",
+        ["snapshot_id": string, "keys": string], ["snapshot_id", "keys"]),
+      schema(
+        "paste", "Paste the clipboard into the observed window", ["snapshot_id": string],
+        ["snapshot_id"]),
+      schema(
+        "scroll", "Scroll a selected element",
+        snapshot.merging([
+          "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
+          "amount": ["type": "integer", "minimum": 1, "maximum": 100],
+        ]) { _, new in new }, ["snapshot_id", "target"]),
+      schema(
+        "clipboard", "Read or write the system clipboard",
+        ["action": ["type": "string", "enum": ["read", "write"]], "text": string]),
+      schema(
+        "app", "List, launch, activate or quit apps; list their windows",
+        [
+          "action": ["type": "string", "enum": ["list", "windows", "launch", "activate", "quit"]],
+          "app": string,
+        ]),
+      schema(
+        "sleep", "Wait briefly for an application",
+        ["seconds": ["type": "number", "minimum": 0, "maximum": 10]]),
+    ]
+  }
+}
+enum NativeFileOperation {
+  static func run(_ name: String, _ path: String) throws -> JSONObject {
+    switch name {
+    case "read_file":
+      let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+      guard fd >= 0 else { throw SideportError("Cannot open file") }
+      defer { Darwin.close(fd) }
+      var info = stat()
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= 1_048_576
+      else { throw SideportError("Read requires a regular file up to 1 MiB") }
+      let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+      let data = try handle.read(upToCount: 1_048_577) ?? Data()
+      guard data.count <= 1_048_576, let value = String(data: data, encoding: .utf8) else {
+        throw SideportError("File must be UTF-8 and at most 1 MiB")
+      }
+      return textResult(["path": path, "content": value])
+    case "list_directory":
+      let entries = try FileManager.default.contentsOfDirectory(atPath: path)
+      guard entries.count <= 10000 else { throw SideportError("Directory listing too large") }
+      return textResult(["path": path, "entries": entries.sorted()])
+    case "write_file":
+      var bytes = Data()
+      while let chunk = try FileHandle.standardInput.read(upToCount: 16384), !chunk.isEmpty {
+        guard bytes.count + chunk.count <= 524288 else { throw SideportError("Write is too large") }
+        bytes.append(chunk)
+      }
+      guard let content = String(data: bytes, encoding: .utf8), content.utf8.count <= 524288 else {
+        throw SideportError("Write is too large")
+      }
+      let fd = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+      guard fd >= 0 else { throw SideportError("Cannot open destination") }
+      defer { Darwin.close(fd) }
+      var info = stat()
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, ftruncate(fd, 0) == 0 else {
+        throw SideportError("Destination must be a regular file")
+      }
+      try FileHandle(fileDescriptor: fd, closeOnDealloc: false).write(
+        contentsOf: Data(content.utf8))
+      return textResult(["path": path, "written_bytes": content.utf8.count])
+    default: throw SideportError("Unknown file operation")
+    }
+  }
+}
