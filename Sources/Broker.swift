@@ -138,14 +138,14 @@ actor NativeBroker {
       case "server/discover":
         result = [
           "supportedVersions": ["2026-07-28", "2025-11-25"],
-          "serverInfo": ["name": "Sideport", "version": "0.3.1"], "capabilities": ["tools": [:]],
+          "serverInfo": ["name": "Sideport", "version": "0.3.2"], "capabilities": ["tools": [:]],
         ]
       case "initialize":
         let requested = params["protocolVersion"] as? String ?? ""
         result = [
           "protocolVersion": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
             .contains(requested) ? requested : "2025-11-25",
-          "serverInfo": ["name": "Sideport", "version": "0.3.1"], "capabilities": ["tools": [:]],
+          "serverInfo": ["name": "Sideport", "version": "0.3.2"], "capabilities": ["tools": [:]],
         ]
       case "ping": result = [:]
       case "tools/list": result = ["tools": tools]
@@ -170,6 +170,7 @@ actor NativeBroker {
     }
   }
   func close() async {
+    try? FileManager.default.removeItem(atPath: context.session + "/desktop-activity.json")
     await providers.close()
     supervisor.shutdown()
     runtime.close()

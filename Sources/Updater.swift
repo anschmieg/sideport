@@ -271,6 +271,30 @@ enum NativeSelfCheck {
     let context = try NativeContext(root: root, session: session)
     let supervisor = ChildSupervisor()
     let runtime = try RuntimeSupport(context, supervisor)
+    let desktop = await MainActor.run { NativeDesktop(runtime: runtime, indicatorsRequired: true) }
+    do {
+      _ = try await desktop.call("sleep", ["seconds": 0])
+      throw SideportError("Computer action proceeded without its activity indicator")
+    } catch {
+      guard error.localizedDescription.contains("activity indicator is unavailable") else {
+        throw error
+      }
+    }
+    let acknowledgement = Task {
+      try await Task.sleep(nanoseconds: 250_000_000)
+      let state = try jsonObject(
+        Data(contentsOf: URL(fileURLWithPath: session + "/desktop-activity.json")))
+      guard let action = state["action"] as? String else {
+        throw SideportError("Missing indicator action receipt")
+      }
+      try privateWrite(["action": action], session + "/desktop-visible.json")
+    }
+    _ = try await desktop.call("sleep", ["seconds": 0])
+    try await acknowledgement.value
+    await desktop.close()
+    print(
+      "SELF-CHECK: desktop action refuses missing indicator; exact local visibility receipt permits it"
+    )
     let approvals = LocalApprovals(context)
     let safety = try CommandSafety(context, supervisor, approvals)
     defer {

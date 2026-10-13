@@ -271,6 +271,55 @@ for line in sys.stdin:
         raise RuntimeError("Guarded local service did not start")
     run([str(exe), "--credential"], env=env)
     scoped = (root / "work/mcpproxy-runtime.key").read_text().strip()
+    # Presence is driven by an authenticated external MCP session, not the
+    # upstream broker's initialize request or the gateway's health endpoint.
+    endpoint = "http://127.0.0.1:" + str(port)
+    session_headers = {"X-API-Key": scoped, "Accept": "application/json, text/event-stream",
+                       "Content-Type": "application/json", "MCP-Protocol-Version": "2025-11-25"}
+    def external_rpc(packet):
+        request = urllib.request.Request(endpoint + "/mcp", data=json.dumps(packet).encode(), headers=session_headers)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            sid = response.headers.get("Mcp-Session-Id")
+            if sid:
+                session_headers["Mcp-Session-Id"] = sid
+            raw = response.read().decode()
+            if not raw:
+                return {}
+            if raw.startswith("event:") or raw.startswith("data:"):
+                raw = next(line[5:].strip() for line in raw.splitlines() if line.startswith("data:"))
+            return json.loads(raw)
+    initialized = external_rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "Sideport indicator fixture", "version": "1"}}})
+    assert "result" in initialized, "External MCP initialization failed"
+    external_rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    listed = external_rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert any(tool["name"]=="call_tool_read" for tool in listed["result"]["tools"]), "Read tool missing from configured gateway surface"
+    deadline = time.monotonic()+20
+    sequence = 3
+    while True:
+        called = external_rpc({"jsonrpc": "2.0", "id": sequence, "method": "tools/call", "params": {"name": "call_tool_read", "arguments": {"name": "permissions:allowed_locations", "args": {}}}})
+        sequence += 1
+        if not called.get("error") and not called.get("result", {}).get("isError"):
+            break
+        if time.monotonic()>=deadline:
+            break
+        time.sleep(0.5)
+    assert not called.get("error") and not called.get("result", {}).get("isError"), "External tool call failed: " + json.dumps(called).replace(scoped, "[redacted]").replace(config["api_key"], "[redacted]")[:2000]
+    admin_headers = {"X-API-Key": config["api_key"]}
+    def active_sessions():
+        request = urllib.request.Request(endpoint + "/api/v1/sessions?status=active&token=mac-chatgpt-session&limit=100", headers=admin_headers)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read())["data"]["sessions"]
+    sessions = active_sessions()
+    assert any(row.get("client_name")=="Sideport indicator fixture" and row.get("token_name")=="mac-chatgpt-session" for row in sessions), "External session missing from presence API"
+    request = urllib.request.Request(endpoint + "/mcp", method="DELETE", headers=session_headers)
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status in (200,202,204)
+    deadline = time.monotonic()+5
+    while time.monotonic()<deadline and any(row.get("client_name")=="Sideport indicator fixture" for row in active_sessions()):
+        time.sleep(0.1)
+    assert not any(row.get("client_name")=="Sideport indicator fixture" for row in active_sessions()), "Closed session still counted as connected"
+    print("PASS: authenticated MCP client presence and transport-close clearing; readiness does not imply a connected agent",flush=True)
     def denied_rest(route, method="GET", token=None):
         headers = {"Authorization": "Bearer " + token} if token else {}
         request = urllib.request.Request("http://127.0.0.1:" + str(port) + route,

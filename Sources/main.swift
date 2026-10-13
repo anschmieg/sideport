@@ -5,6 +5,17 @@ import Foundation
 
 signal(SIGPIPE, SIG_IGN)
 let arguments = CommandLine.arguments
+if arguments.count == 3, arguments[1] == "--indicator-check" {
+  let application = NSApplication.shared
+  application.setActivationPolicy(.accessory)
+  do {
+    try DesktopControlIndicator().checkAndPreview(arguments[2])
+    exit(0)
+  } catch {
+    try? FileHandle.standardError.write(contentsOf: Data((error.localizedDescription + "\n").utf8))
+    exit(1)
+  }
+}
 if arguments.count == 3, arguments[1] == "--service-probe",
   ["com.apple.replayd", "com.apple.windowserver.active"].contains(arguments[2])
 {

@@ -44,7 +44,7 @@ final class StdioPeer: ToolPeer, @unchecked Sendable {
   private var timers: [String: DispatchWorkItem] = [:]
   private var closed = false
   var version = ""
-  let identity: JSONObject = ["name": "Sideport", "version": "0.3.1"]
+  let identity: JSONObject = ["name": "Sideport", "version": "0.3.2"]
   init(
     _ supervisor: ChildSupervisor, _ executable: String, _ args: [String],
     environment: [String: String], cwd: String

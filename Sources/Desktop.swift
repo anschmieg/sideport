@@ -10,15 +10,24 @@ final class NativeDesktop {
   let automation: UIAutomationService
   let applications: ApplicationService
   let observation: DesktopObservationService
-  var latest: DesktopObservationResult?
+  var indicatorWindow: Int?
+  var indicatorAction = UUID().uuidString
+  var latest: DesktopObservationResult? {
+    didSet { if let window = latest?.target.window?.windowID { indicatorWindow = Int(window) } }
+  }
   var observedAt = Date.distantPast
   let runtime: RuntimeSupport?
+  let indicatorsRequired: Bool
   let pasteboard: NSPasteboard
   let clipboardNamespace = UUID().uuidString
   let clipboard: ClipboardService
   var clipboardSlots = Set<String>()
   var requestedNativePermissions = false
-  init(runtime: RuntimeSupport? = nil, pasteboard: NSPasteboard = .general) {
+  init(
+    runtime: RuntimeSupport? = nil, pasteboard: NSPasteboard = .general,
+    indicatorsRequired: Bool = ProcessInfo.processInfo.environment["SIDEPORT_INDICATORS"] == "1"
+  ) {
+    self.indicatorsRequired = indicatorsRequired
     self.runtime = runtime
     self.pasteboard = pasteboard
     clipboard = ClipboardService(pasteboard: pasteboard, sizeLimit: 1_048_576)
@@ -90,7 +99,54 @@ final class NativeDesktop {
     }
     throw SideportError("Captured image exceeds the connection’s response limit")
   }
+  func publishActivity(_ args: JSONObject, busy: Bool, screenWide: Bool) throws {
+    guard let runtime else { return }
+    var value: JSONObject = [
+      "pid": getpid(), "at": Date().timeIntervalSince1970, "busy": busy, "screen_wide": screenWide,
+      "action": indicatorAction,
+    ]
+    value["identity"] = OwnedExecution.token(getpid()).map(OwnedExecution.values) ?? []
+    if let display = args["display_index"] as? Int { value["display"] = display }
+    if let window = args["window_id"] as? UInt32 {
+      value["window"] = window
+    } else if let window = latest?.target.window?.windowID {
+      value["window"] = window
+    } else if let window = indicatorWindow {
+      value["window"] = window
+    }
+    try privateWrite(value, runtime.context.session + "/desktop-activity.json")
+  }
   func call(_ tool: String, _ args: JSONObject) async throws -> JSONObject {
+    let indicates = tool != "permissions"
+    let screenWide =
+      ["screen", "all_screens", "menubar"].contains(args["target"] as? String ?? "")
+      || ["app", "space", "dock"].contains(tool)
+    if indicates {
+      indicatorAction = UUID().uuidString
+      let retargeting =
+        ["see", "inspect_ui", "capture", "image", "verify_state"].contains(tool)
+        && args["window_id"] == nil
+      try publishActivity(args, busy: true, screenWide: screenWide || retargeting)
+    }
+    defer { if indicates { try? publishActivity(args, busy: false, screenWide: screenWide) } }
+    if indicates, let runtime, indicatorsRequired {
+      let deadline = Date().addingTimeInterval(2)
+      var visible = false
+      while Date() < deadline {
+        let path = runtime.context.session + "/desktop-visible.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.count <= 1024,
+          let receipt = try? jsonObject(data), receipt["action"] as? String == indicatorAction
+        {
+          visible = true
+          break
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+      }
+      guard visible else {
+        throw SideportError(
+          "Computer control paused because its local activity indicator is unavailable")
+      }
+    }
     if let extra = try await extra(tool, args) { return extra }
     if tool == "permissions" {
       return textResult(await permissionStatus())

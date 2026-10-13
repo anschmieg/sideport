@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 p = argparse.ArgumentParser()
 p.add_argument("--dependencies", type=pathlib.Path, required=True, help="Existing trusted Sideport work directory")
 p.add_argument("--tunnel-runtime", type=pathlib.Path, required=True, help="Verified official runtime-only tunnel release directory")
@@ -70,7 +70,7 @@ for name in ["Peekaboo", "AXorcist", "Commander", "swift-log", "swift-algorithms
         shutil.copy2(source, licenses / (name + ".txt"))
 info = {"CFBundleName": "Sideport", "CFBundleDisplayName": "Sideport", "CFBundleExecutable": "Sideport",
         "CFBundleIdentifier": "local.adrian.mac-chatgpt.mcpproxy", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "11", "CFBundleIconFile": "Sideport",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "12", "CFBundleIconFile": "Sideport",
         "LSUIElement": True, "LSMinimumSystemVersion": "15.0",
         "NSAppleEventsUsageDescription": "Sideport lets approved remote agents interact with apps on this Mac."}
 (contents / "Info.plist").write_bytes(plistlib.dumps(info))

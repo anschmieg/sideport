@@ -426,6 +426,36 @@ final class SecurityTests {
     assertEqual(parsed["secret_keys"] as? [String], ["SIDEPORT_PRIVATE_TEST"])
     assertNil((parsed["environment"] as? JSONObject)?["SIDEPORT_PRIVATE_TEST"])
   }
+  func testAgentIndicators() throws {
+    let now = Date()
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let current: JSONObject = [
+      "status": "active", "token_name": "mac-chatgpt-session", "start_time": iso.string(from: now),
+      "client_name": "Claude",
+    ]
+    var stale = current
+    stale["start_time"] = iso.string(from: now.addingTimeInterval(-60))
+    var closed = current
+    closed["status"] = "closed"
+    var admin = current
+    admin["token_name"] = "admin"
+    assertEqual(
+      AgentPresence.clients(
+        ["data": ["sessions": [stale, closed, admin, current]]], since: now.addingTimeInterval(-1)),
+      ["Claude"])
+    assertEqual(AgentPresence.clients([:], since: now), [])
+    assertEqual(AgentPresence.name("\n\u{202E}Claude\t"), "Claude")
+    assertEqual(AgentPresence.name(nil), "Remote agent")
+    let state: JSONObject = [
+      "pid": getpid(), "at": now.timeIntervalSince1970, "busy": false,
+      "identity": OwnedExecution.token(getpid()).map(OwnedExecution.values) ?? [],
+    ]
+    assertTrue(AgentPresence.desktopActive(state, now: now))
+    assertFalse(AgentPresence.desktopActive(state, now: now.addingTimeInterval(9)))
+    assertFalse(AgentPresence.desktopActive(state, now: now.addingTimeInterval(-1)))
+    assertFalse(AgentPresence.desktopActive(["pid": 0, "at": now.timeIntervalSince1970]))
+  }
   func testLegacyRememberedLocationFormat() throws {
     let base = "/private/tmp/sideport-remember-test-" + UUID().uuidString
     let project = base + "/project"
@@ -469,9 +499,10 @@ extension SecurityTests {
     try tests.testLegacyRememberedLocationFormat()
     try await tests.testComputerCompatibility()
     try tests.testPrivateJobManifestExcludesCredentials()
+    try tests.testAgentIndicators()
     guard RegressionReport.failures == 0 else {
       throw SideportError("Native regression checks failed")
     }
-    print("Native regression checks passed: 20 groups")
+    print("Native regression checks passed: 21 groups")
   }
 }

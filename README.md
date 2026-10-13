@@ -1,6 +1,8 @@
 # Sideport
 
-Native macOS tray app and MCP broker for remote agents. Alpha 0.3.1.
+Native macOS tray app and MCP broker for remote agents. Alpha 0.3.2.
+
+This release adds a distinct menu-bar icon, a pill for confirmed client sessions, and desktop-control outlines with a local Stop button. See [behaviour and validation](Docs/indicators-0.3.2.md).
 
 **Release status: ready for alpha testing.** Detached-process cleanup passes adversarial tests. A controlled GUI test confirms working capture/input and refusal of screen/Accessibility access from sandboxed commands. See [the audit follow-up](Docs/native-followup-2026-10-13.md).
 

@@ -12,7 +12,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   var childEnvironment: [String: String] {
     [
       "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      "HOME": NSHomeDirectory(), "SIDEPORT_HOME": root.path,
+      "HOME": NSHomeDirectory(), "SIDEPORT_HOME": root.path, "SIDEPORT_INDICATORS": "1",
       "SIDEPORT_APP_EXECUTABLE": Bundle.main.executablePath ?? "",
       "SIDEPORT_RESOURCES": NativeResources.directory.path,
       "SIDEPORT_WORKSPACE": ProcessInfo.processInfo.environment["SIDEPORT_WORKSPACE"]
@@ -25,6 +25,10 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   }
   var item: NSStatusItem!
   var status: NSMenuItem!
+  let desktopIndicator = DesktopControlIndicator()
+  var agentClients: [String] = []
+  var presenceChecking = false
+  var presenceCheckedAt = Date.distantPast
   var popover: NSPopover!
   var connectionSwitch: NSSwitch!
   var connectionState: NSTextField!
@@ -262,14 +266,73 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     connectionSwitch.state = active ? .on : .off
     connectionSwitch.isEnabled = !stopping && !updating
     connectionSwitch.setAccessibilityValue(ready ? "Ready" : off ? "Off" : text)
-    item.button?.image = NSImage(
-      systemSymbolName: active ? "desktopcomputer.badge.checkmark" : "desktopcomputer",
-      accessibilityDescription: text)
-    item.button?.title = active ? " On" : " Off"
-    item.button?.toolTip = text
+    if !active {
+      agentClients = []
+      desktopIndicator.hide()
+    }
+    renderAgentPresence()
+    if agentClients.isEmpty { item.button?.toolTip = text }
     connectItem.isEnabled = proxy == nil && !stopping && !updating
     updateItem?.isEnabled = proxy == nil && !stopping && !updating
     disconnectItem.isEnabled = proxy != nil && !stopping
+  }
+  func renderAgentPresence() {
+    let connected = !agentClients.isEmpty && proxy?.isRunning == true && !stopping
+    item.button?.image = SideportGlyph.image(connected: connected)
+    item.button?.title = ""
+    item.button?.setAccessibilityLabel(
+      connected ? "Sideport · remote agent connected" : "Sideport · no confirmed agent session")
+    if !connected, status.title == "Connected — Mac access on" {
+      connectionState.stringValue = "Ready · no confirmed agent session"
+    }
+    if connected {
+      connectionState.stringValue =
+        agentClients.count == 1
+        ? "Connected · " + agentClients[0] : "Connected · \(agentClients.count) agent sessions"
+      item.button?.toolTip = connectionState.stringValue
+    }
+  }
+  func checkAgentActivity() {
+    guard !stopping, proxy?.isRunning == true, let directory = approvalDirectory else {
+      desktopIndicator.hide()
+      return
+    }
+    desktopIndicator.onStop = { [weak self] in self?.disconnect() }
+    if let data = try? Data(contentsOf: directory.appendingPathComponent("desktop-activity.json")),
+      data.count <= 4096, let activity = try? jsonObject(data),
+      AgentPresence.desktopActive(activity)
+    {
+      let client =
+        agentClients.count == 1
+        ? agentClients[0] : agentClients.isEmpty ? "Remote agent" : "Multiple remote agents"
+      desktopIndicator.show(
+        client: client, window: activity["window"] as? UInt32,
+        screenWide: activity["screen_wide"] as? Bool == true,
+        displayIndex: activity["display"] as? Int)
+      if let action = activity["action"] as? String, UUID(uuidString: action) != nil {
+        try? writePrivate(
+          ["action": action], to: directory.appendingPathComponent("desktop-visible.json"))
+      }
+    } else {
+      desktopIndicator.hide()
+    }
+    guard !presenceChecking, Date().timeIntervalSince(presenceCheckedAt) >= 2,
+      let admin = try? GatewayAdmin(root.path)
+    else { return }
+    presenceChecking = true
+    let gateway = proxy
+    let since = started
+    Task {
+      let response = try? await admin.api(
+        "GET", "/api/v1/sessions?status=active&token=mac-chatgpt-session&limit=100")
+      await MainActor.run {
+        self.presenceChecking = false
+        guard self.proxy === gateway, !self.stopping else { return }
+        self.presenceCheckedAt = Date()
+        self.agentClients = response.map { AgentPresence.clients($0, since: since) } ?? []
+        self.renderAgentPresence()
+      }
+    }
   }
   func reviewSettings() -> [String: Any] {
     guard
@@ -396,7 +459,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   }
   @objc func about() {
     report(
-      "Early alpha · Version 0.3.1\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
+      "Early alpha · Version 0.3.2\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
     )
   }
   func launch(_ path: String, _ arguments: [String]) throws -> Process {
@@ -612,6 +675,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
   }
   func checkPermissions() {
+    checkAgentActivity()
     let stopMarker = root.appendingPathComponent(
       connectionTest ? "work/connection-test.stop" : "work/permission-test.stop")
     if (permissionTest || connectionTest) && FileManager.default.fileExists(atPath: stopMarker.path)
@@ -1017,6 +1081,8 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   func stop(_ message: String, completion: (() -> Void)? = nil) {
     guard !stopping else { return }
     stopping = true
+    agentClients = []
+    desktopIndicator.hide()
     credentialLock.lock()
     credentialCancelled = true
     let preparation = credentialProcess
