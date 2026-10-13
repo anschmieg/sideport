@@ -16,12 +16,24 @@ struct CommandOutput {
 }
 final class ChildSupervisor: @unchecked Sendable {
   private let lock = NSLock()
+  private let ownedRouting: Bool
+  private var closed = false
+  init(ownedRouting: Bool = true) { self.ownedRouting = ownedRouting }
   private var children = Set<pid_t>()
   private var trees: [pid_t: [pid_t: ProcessIdentity]] = [:]
   private var leaders: [pid_t: ProcessIdentity] = [:]
   private var observationTimer: DispatchSourceTimer?
   func track(_ pid: pid_t) {
     lock.lock()
+    if closed {
+      lock.unlock()
+      kill(pid, SIGKILL)
+      return
+    }
+    trackLocked(pid)
+    lock.unlock()
+  }
+  private func trackLocked(_ pid: pid_t) {
     children.insert(pid)
     leaders[pid] = identity(pid)
     trees[pid] = [:]
@@ -33,7 +45,6 @@ final class ChildSupervisor: @unchecked Sendable {
       observationTimer = timer
       timer.resume()
     }
-    lock.unlock()
   }
   private func refreshTrees() {
     lock.lock()
@@ -87,6 +98,13 @@ final class ChildSupervisor: @unchecked Sendable {
     lock.unlock()
     for pid in all { stop(pid) }
   }
+  func shutdown() {
+    lock.lock()
+    closed = true
+    let all = children
+    lock.unlock()
+    for pid in all { stop(pid) }
+  }
   var count: Int {
     lock.lock()
     defer { lock.unlock() }
@@ -96,6 +114,27 @@ final class ChildSupervisor: @unchecked Sendable {
     _ executable: String, _ arguments: [String], environment: [String: String], cwd: String,
     input: Pipe, output: Pipe, error: Pipe
   ) throws -> pid_t {
+    if ownedRouting, executable.hasSuffix("/work/nono-bin/nono") {
+      var secured = environment
+      secured["SIDEPORT_HOME"] = String(executable.dropLast("/work/nono-bin/nono".count))
+      if secured.keys.contains(where: { $0.hasPrefix("SIDEPORT_PRIVATE_") }) {
+        guard let helper = Bundle.main.executablePath,
+          ProcessProtection.credentialSafe(helper), ProcessProtection.credentialSafe(executable)
+        else {
+          throw SideportError("Credential-bearing execution requires protected signed helpers")
+        }
+      }
+      guard
+        let job = try OwnedExecution.prepare(executable, arguments, environment: secured, cwd: cwd)
+      else { throw SideportError("Cannot establish sandbox job ownership") }
+      do {
+        return try spawn(
+          job.0, job.1, environment: secured, cwd: cwd, input: input, output: output, error: error)
+      } catch {
+        try? FileManager.default.removeItem(atPath: job.1[1])
+        throw error
+      }
+    }
     var actions: posix_spawn_file_actions_t?
     var attributes: posix_spawnattr_t?
     var pid: pid_t = 0
@@ -136,13 +175,19 @@ final class ChildSupervisor: @unchecked Sendable {
       for value in args { free(value) }
       for value in env { free(value) }
     }
+    lock.lock()
+    guard !closed else {
+      lock.unlock()
+      throw SideportError("Execution controller is closed")
+    }
     let status = args.withUnsafeBufferPointer { argv in
       env.withUnsafeBufferPointer { envp in
         posix_spawn(&pid, executable, &actions, &attributes, argv.baseAddress!, envp.baseAddress!)
       }
     }
+    if status == 0 { trackLocked(pid) }
+    lock.unlock()
     guard status == 0 else { throw SideportError("Child process could not start: \(status)") }
-    track(pid)
     try? input.fileHandleForReading.close()
     try? output.fileHandleForWriting.close()
     try? error.fileHandleForWriting.close()

@@ -14,10 +14,10 @@ final class SmitheryPeer: ToolPeer {
     self.namespace = namespace
   }
   func connect() async throws {
-    tools = try NativeProviders.validateTools(
-      await manager.smithery(
+    tools = try ManagedServers.toolListing(
+      await manager.smitheryValue(
         ["tool", "list", connection, "--namespace", namespace, "--flat", "--limit", "1000"],
-        supervisor: supervisor)["tools"])
+        supervisor: supervisor))
   }
   func request(_ method: String, _ params: JSONObject, timeout: Double) async throws -> JSONObject {
     guard !closed else { throw SideportError("Forwarding stopped") }
@@ -34,7 +34,7 @@ final class SmitheryPeer: ToolPeer {
   }
   func close() {
     closed = true
-    supervisor.stopAll()
+    supervisor.shutdown()
   }
 }
 final class ManagedServers {
@@ -46,9 +46,22 @@ final class ManagedServers {
     self.approvals = approvals
     self.node = node
   }
+  static func toolListing(_ value: Any) throws -> [JSONObject] {
+    try NativeProviders.validateTools(value as? [JSONObject] ?? (value as? JSONObject)?["tools"])
+  }
+  static func connectionListing(_ value: Any) throws -> [JSONObject] {
+    let object = value as? JSONObject ?? [:]
+    guard
+      let rows = value as? [JSONObject] ?? (object["connections"] ?? object["servers"])
+        as? [JSONObject], rows.count <= 1000
+    else { throw SideportError("Unsupported Smithery connection listing") }
+    return rows
+  }
   static func identifier(_ value: String) throws -> String {
     guard !value.isEmpty, value.utf8.count <= 200, !value.hasPrefix("-"),
-      value.range(of: #"^[A-Za-z0-9_./:@-]+$"#, options: .regularExpression) != nil
+      value.range(of: #"^[A-Za-z0-9_./:@-]+$"#, options: .regularExpression) != nil,
+      !value.contains("://"),
+      !value.split(separator: "/").contains(where: { $0 == "." || $0 == ".." })
     else { throw SideportError("Invalid managed server identifier") }
     return value
   }
@@ -114,6 +127,11 @@ final class ManagedServers {
           + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
       ], cwd: runtime.scratch, timeout: 30, limit: 4_194_304)
     guard out.code == 0, !out.stopped else {
+      if String(decoding: out.stderr, as: UTF8.self).contains("404") {
+        throw SideportError(
+          "Smithery returned 404; verify that the selected namespace and connection still exist in Smithery locally"
+        )
+      }
       throw SideportError("Smithery request failed; check the existing login locally")
     }
     return String(decoding: out.stdout, as: UTF8.self).trimmingCharacters(
@@ -153,13 +171,7 @@ final class ManagedServers {
     guard args["manager"] as? String == "smithery" else { throw SideportError("Unknown manager") }
     let ns = try await namespace(args)
     let result = try await smitheryValue(["mcp", "list", "--namespace", ns, "--limit", "1000"])
-    let object = result as? JSONObject ?? [:]
-    guard
-      let rows = result as? [JSONObject] ?? (object["connections"] ?? object["servers"])
-        as? [JSONObject]
-    else {
-      throw SideportError("Unsupported Smithery connection listing")
-    }
+    let rows = try Self.connectionListing(result)
     return textResult([
       "namespace": ns,
       "servers": rows.map {
@@ -175,6 +187,16 @@ final class ManagedServers {
     let reason = try NativeDesktop.string(args, "reason", maximum: 500)
     if args["manager"] as? String == "smithery" {
       let ns = try await namespace(args)
+      guard GitHubPlan.matches(ns, #"^[A-Za-z0-9_-]{1,200}$"#) else {
+        throw SideportError("Invalid Smithery namespace")
+      }
+      let existing = try Self.connectionListing(
+        await smitheryValue(["mcp", "list", "--namespace", ns, "--limit", "1000"]))
+      guard
+        existing.contains(where: {
+          ($0["connectionId"] ?? $0["id"] ?? $0["name"]) as? String == name
+        })
+      else { throw SideportError("Choose an existing Smithery connection from managed_servers") }
       guard
         try await approvals.capability(
           "managed_server",

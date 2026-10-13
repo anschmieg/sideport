@@ -1,5 +1,7 @@
 # Native branch audit — 13 October 2026
 
+Historical initial findings. The [follow-up](native-followup-2026-10-13.md) records the corrections, final controlled GUI test and current release status.
+
 Status: **hold migration**. The native branch has substantial core parity, but it does not have full legacy computer-tool compatibility or a demonstrated boundary that stops every agent-started process on disconnect.
 
 Comparison: `main` / `077854d` (legacy 0.2.2 sources), against `feat/native-swift-core` / `eb1e35b` and the fixes from this audit. The installed app and live tunnel were not replaced or restarted. All gateway/approval mutations used private test state; GitHub checks were account reads and an owned-repository push dry-run.

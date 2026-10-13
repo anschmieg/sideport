@@ -185,11 +185,37 @@ final class RuntimeSupport {
       "(deny network-outbound (subpath \"/\"))",
       "(allow network-outbound (path \"/private/var/run/mDNSResponder\"))",
       "(allow network-outbound (path \"/var/run/mDNSResponder\"))",
+      "(deny job-creation)",
+      "(deny system-audit)",
+      "(deny mach-priv-task-port)",
+      // Screen/Accessibility services can be proxied through multiple daemons.
+      // Do not rely on an exhaustive denylist of GUI service names.
+      "(deny mach-lookup)",
+      "(deny mach-per-user-lookup)",
+      // Limit process inspection and signals to the untrusted job. Credential
+      // environments also require CS_RESTRICT; these rules alone do not hide
+      // KERN_PROCARGS from same-user callers on macOS.
+      "(deny process-info*)",
+      "(allow process-info* (target self))",
+      "(allow process-info* (target same-sandbox))",
+      "(allow process-info-listpids)",
+      "(deny signal)",
+      "(allow signal (target self))",
+      "(allow signal (target same-sandbox))",
     ]
+      + [
+        "com.apple.system.logger", "com.apple.logd", "com.apple.dnssd.service",
+        "com.apple.networkd", "com.apple.SystemConfiguration.configd",
+        "com.apple.trustd", "com.apple.trustd.agent",
+      ].map { "(allow mach-lookup (global-name \"" + $0 + "\"))" }
       + [
         "com.apple.windowserver.active", "com.apple.windowserver", "com.apple.WindowServer",
         "com.apple.coreservices.launchservicesd", "com.apple.tccd", "com.apple.axserver",
         "com.apple.xpc.launchd",
+        "com.apple.securityd", "com.apple.SecurityServer", "com.apple.securityd.xpc",
+        "com.apple.replayd", "com.apple.replayd.capture",
+        "com.apple.replaykit.sharingsession", "com.apple.replaykit.sharingsession.notification",
+        "com.apple.usernotifications.delegate.com.apple.ReplayKitNotifications",
         "com.apple.coreservices.uauseractivitypasteboardclient.xpc",
       ].map { "(deny mach-lookup (global-name \"" + $0 + "\"))" } + [
         "(deny mach-lookup (global-name-regex \"^com\\\\.apple\\\\.(pasteboard|pboard)(\\\\..*)?$\"))"

@@ -84,3 +84,94 @@ extension ProcessInfo {
     }
   }
 }
+
+// Go before 1.27 ignores SSL_CERT_FILE on macOS. Use the installed CLI when it
+// supports explicit CA bundles; otherwise cache an unmodified official release.
+actor CompatibleGitHub {
+  static let version = "2.102.0"
+  static let checksum = "da922c20d1792e5b2cbf375593d7a658acf034c12c84e007e71c76ef959c337e"
+  let runtime: RuntimeSupport
+  var loading = false
+  var prepared: String?
+  init(_ runtime: RuntimeSupport) { self.runtime = runtime }
+  nonisolated static func supportsCertificateBundle(_ path: String) -> Bool {
+    guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe),
+      bytes.count < 80_000_000,
+      let header = bytes.range(of: Data([255] + Array(" Go buildinf:".utf8))),
+      header.lowerBound + 33 < bytes.count,
+      bytes[header.lowerBound + 15] & 2 != 0
+    else { return false }
+    var offset = header.lowerBound + 32
+    var length = 0
+    for shift in stride(from: 0, through: 28, by: 7) {
+      guard offset < bytes.count else { return false }
+      let byte = bytes[offset]
+      offset += 1
+      length |= Int(byte & 127) << shift
+      if byte & 128 == 0 { break }
+    }
+    guard (1...64).contains(length), offset + length <= bytes.count,
+      let version = String(data: bytes[offset..<offset + length], encoding: .utf8),
+      GitHubPlan.matches(version, #"^go1\.\d+(?:\.\d+)?$"#),
+      let minor = Int(version.dropFirst(4).split(separator: ".")[0])
+    else { return false }
+    return minor >= 27
+  }
+  func ensure() async throws -> String {
+    if let prepared { return prepared }
+    guard let installed = runtime.trustedTools["gh"] else {
+      throw SideportError("Install GitHub CLI and sign in locally first")
+    }
+    if Self.supportsCertificateBundle(installed) {
+      prepared = installed
+      return installed
+    }
+    guard !loading else {
+      throw SideportError("GitHub compatibility helper is being prepared; retry shortly")
+    }
+    loading = true
+    defer { loading = false }
+    let cached = runtime.context.work + "/runtimes/github-" + Self.version
+    if !FileManager.default.isExecutableFile(atPath: cached + "/gh") {
+      let stage = runtime.context.work + "/runtimes/.gh-stage-" + UUID().uuidString
+      try directory(stage)
+      defer { try? FileManager.default.removeItem(atPath: stage) }
+      let name = "gh_" + Self.version + "_macOS_arm64.zip"
+      let archive = stage + "/" + name
+      let download = try await runtime.supervisor.run(
+        "/usr/bin/curl",
+        [
+          "--disable", "--fail", "--silent", "--show-error", "--location", "--proto", "=https",
+          "--proto-redir", "=https", "--max-time", "120", "--max-filesize", "30000000", "--output",
+          archive,
+          "https://github.com/cli/cli/releases/download/v" + Self.version + "/" + name,
+        ], environment: ["HOME": runtime.context.home, "PATH": "/usr/bin:/bin"], cwd: stage,
+        timeout: 125)
+      guard download.code == 0, !download.stopped else {
+        throw SideportError("Official GitHub helper download failed")
+      }
+      let bytes = try Data(contentsOf: URL(fileURLWithPath: archive), options: .mappedIfSafe)
+      guard bytes.count <= 30_000_000,
+        SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == Self.checksum
+      else { throw SideportError("Official GitHub helper checksum mismatch") }
+      try directory(stage + "/unpacked")
+      try await ReleaseArchive.extract(archive, to: stage + "/unpacked", runner: runtime.supervisor)
+      let source = stage + "/unpacked/gh_" + Self.version + "_macOS_arm64/bin/gh"
+      guard Self.supportsCertificateBundle(source) else {
+        throw SideportError("GitHub helper lacks required TLS support")
+      }
+      try directory(cached)
+      try FileManager.default.copyItem(atPath: source, toPath: cached + "/gh")
+      chmod(cached + "/gh", 0o500)
+    }
+    guard Self.supportsCertificateBundle(cached + "/gh") else {
+      throw SideportError("Cached GitHub helper is incompatible")
+    }
+    let frozen = runtime.hostTools + "/github-" + Self.version
+    try directory(frozen)
+    try FileManager.default.copyItem(atPath: cached + "/gh", toPath: frozen + "/gh")
+    chmod(frozen + "/gh", 0o500)
+    prepared = frozen + "/gh"
+    return prepared!
+  }
+}

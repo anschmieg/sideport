@@ -15,35 +15,55 @@ extension NativeDesktop {
         return textResult(try serialized(await menus.listMenus(for: Self.string(args, "app"))))
       case "extras": return textResult(try serialized(await menus.listMenuExtras()))
       case "click":
-        try await menus.clickMenuItem(
+        let result = try await menus.clickMenuItemActionResult(
           app: Self.string(args, "app"), itemPath: Self.string(args, "path"))
         latest = nil
-        return textResult(["completed": true])
+        return Self.actionResult(result.outcome, operation: "menu")
       case "click_extra":
-        try await menus.clickMenuExtra(title: Self.string(args, "title"))
+        let result = try await menus.clickMenuExtraActionResult(title: Self.string(args, "title"))
         latest = nil
-        return textResult(["completed": true])
+        return Self.actionResult(result.outcome, operation: "menu")
       default: throw SideportError("Unknown menu action")
       }
     }
     if tool == "dock" {
       let dock = DockService(feedbackClient: NoopAutomationFeedbackClient())
+      var outcome: DesktopActionOutcome?
       switch args["action"] as? String ?? "list" {
       case "list": return textResult(try serialized(await dock.listDockItems(includeAll: true)))
-      case "launch": try await dock.launchFromDock(appName: Self.string(args, "app"))
+      case "launch":
+        outcome = try await dock.launchFromDockActionResult(appName: Self.string(args, "app"))
+          .outcome
       case "menu", "right-click":
-        try await dock.rightClickDockItem(
-          appName: Self.string(args, "app"), menuItem: args["item"] as? String)
-      case "hide": try await dock.hideDock()
-      case "show": try await dock.showDock()
+        outcome = try await dock.rightClickDockItemActionResult(
+          appName: Self.string(args, "app"), menuItem: args["item"] as? String
+        ).outcome
+      case "hide": outcome = try await dock.hideDockActionResult().outcome
+      case "show": outcome = try await dock.showDockActionResult().outcome
       case "add": try await dock.addToDock(path: Self.string(args, "path"), persistent: true)
       case "remove": try await dock.removeFromDock(appName: Self.string(args, "app"))
       default: throw SideportError("Unknown Dock action")
       }
       latest = nil
-      return textResult(["completed": true])
+      return Self.actionResult(outcome, operation: "dock")
     }
     if tool == "dialog" {
+      if ["file", "file-picker", "file_picker"].contains(args["action"] as? String ?? "") {
+        let (observed, _) = try retained(args)
+        defer { latest = nil }
+        guard let identity = observed.target.detectionContext?.windowMutationIdentity,
+          SystemIdentityResolver.validateWindowMutationIdentity(identity),
+          let window = observed.target.window?.windowID
+        else { throw SideportError("Observe the exact file dialog again") }
+        let dialogs = DialogService(
+          applicationService: applications, feedbackClient: NoopAutomationFeedbackClient())
+        let result = try await dialogs.handleFileDialog(
+          try DialogFileExecutionRequest(
+            target: DialogTargetSelector(windowID: Int(window)), path: args["path"] as? String,
+            filename: args["filename"] as? String, actionButton: args["button"] as? String,
+            ensureExpanded: args["ensure_expanded"] as? Bool ?? false))
+        return Self.actionResult(result.outcome, operation: "file dialog")
+      }
       if args["action"] as? String == "click" { return try await call("click", args) }
       if ["type", "input"].contains(args["action"] as? String ?? "") {
         return try await call("type", args)
@@ -79,38 +99,54 @@ extension NativeDesktop {
         let id = result.target.window?.windowID
       else { throw SideportError("Window actions require a recent exact window observation") }
       let target = WindowTarget.windowId(Int(id))
+      var outcome: DesktopActionOutcome?
       switch action {
       case "close":
-        try await windows.closeWindow(
-          target: target, expectedIdentity: identity, allowForegroundFallback: false)
-      case "minimize": try await windows.minimizeWindow(target: target, expectedIdentity: identity)
-      case "restore": try await windows.restoreWindow(target: target, expectedIdentity: identity)
-      case "maximize": try await windows.maximizeWindow(target: target, expectedIdentity: identity)
+        outcome = try await windows.closeWindowActionResult(
+          target: target, expectedIdentity: identity, allowForegroundFallback: false
+        ).outcome
+      case "minimize":
+        outcome = try await windows.minimizeWindowActionResult(
+          target: target, expectedIdentity: identity
+        ).outcome
+      case "restore":
+        outcome = try await windows.restoreWindowActionResult(
+          target: target, expectedIdentity: identity
+        ).outcome
+      case "maximize":
+        outcome = try await windows.maximizeWindowActionResult(
+          target: target, expectedIdentity: identity
+        ).outcome
       case "focus":
-        _ = try await windows.focusWindowActionResult(target: target, expectedIdentity: identity)
+        outcome = try await windows.focusWindowActionResult(
+          target: target, expectedIdentity: identity
+        ).outcome
       case "move":
         guard let x = args["x"] as? Double, let y = args["y"] as? Double, x.isFinite, y.isFinite
         else { throw SideportError("Provide finite window coordinates") }
-        try await windows.moveWindow(
-          target: target, expectedIdentity: identity, to: CGPoint(x: x, y: y))
+        outcome = try await windows.moveWindowActionResult(
+          target: target, expectedIdentity: identity, to: CGPoint(x: x, y: y)
+        ).outcome
       case "resize":
         guard let width = args["width"] as? Double, let height = args["height"] as? Double,
           width > 0, height > 0, width <= 20000, height <= 20000
         else { throw SideportError("Provide bounded window dimensions") }
-        try await windows.resizeWindow(
-          target: target, expectedIdentity: identity, to: CGSize(width: width, height: height))
+        outcome = try await windows.resizeWindowActionResult(
+          target: target, expectedIdentity: identity, to: CGSize(width: width, height: height)
+        ).outcome
       case "set-bounds", "set_bounds":
         guard let x = args["x"] as? Double, let y = args["y"] as? Double,
           let width = args["width"] as? Double, let height = args["height"] as? Double,
           x.isFinite, y.isFinite, width > 0, height > 0, width <= 20000, height <= 20000
         else { throw SideportError("Provide finite window bounds up to 20000 points") }
-        try await windows.setWindowBounds(
+        outcome = try await windows.setWindowBoundsActionResult(
           target: target, expectedIdentity: identity,
-          bounds: CGRect(x: x, y: y, width: width, height: height))
+          bounds: CGRect(x: x, y: y, width: width, height: height)
+        ).outcome
       default: throw SideportError("Unknown window action")
       }
       latest = nil
-      return textResult(["completed": true])
+      return Self.actionResult(outcome, operation: "window " + action)
     }
     if tool == "move" {
       let (result, _) = try retained(args)
@@ -119,11 +155,11 @@ extension NativeDesktop {
       else { throw SideportError("Pointer target window changed; observe it again") }
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
-      try await automation.moveMouse(
+      let moved = try await automation.moveMouseWithOutcome(
         to: CGPoint(x: element.bounds.midX, y: element.bounds.midY), duration: 200, steps: 10,
         profile: .linear)
       latest = nil
-      return textResult(["completed": true])
+      return Self.actionResult(moved.outcome, operation: "move pointer")
     }
     if tool == "space" {
       let spaces = SpaceManagementService(feedbackClient: NoopAutomationFeedbackClient())
@@ -152,7 +188,7 @@ extension NativeDesktop {
         throw SideportError("Unknown Space action")
       }
       latest = nil
-      return textResult(["completed": true])
+      return Self.actionResult(nil, operation: "space " + action)
     }
     return nil
   }

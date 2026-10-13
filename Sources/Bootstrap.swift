@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum SideportBootstrap {
-  static let version = "0.3.0"
+  static let version = "0.3.1"
   static let payload = ["mcpproxy-bin", "nono-bin", "tunnel-client", "permission-broker"]
   static func prepare() throws {
     let root =

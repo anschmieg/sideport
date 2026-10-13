@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 p = argparse.ArgumentParser()
 p.add_argument("--dependencies", type=pathlib.Path, required=True, help="Existing trusted Sideport work directory")
 p.add_argument("--tunnel-runtime", type=pathlib.Path, required=True, help="Verified official runtime-only tunnel release directory")
@@ -26,7 +26,7 @@ if readiness["blockers"] and not args.audit_only:
 def run(command, **kwargs):
     result = subprocess.run(command, capture_output=True, text=True, timeout=600, **kwargs)
     if result.returncode:
-        raise RuntimeError(result.stderr[-4000:])
+        raise RuntimeError((result.stdout + result.stderr)[-4000:])
     return result.stdout
 
 run(["/usr/bin/xcrun", "swift", "build", "--build-system", "native", "-c", "release"], cwd=REPO)
@@ -70,7 +70,7 @@ for name in ["Peekaboo", "AXorcist", "Commander", "swift-log", "swift-algorithms
         shutil.copy2(source, licenses / (name + ".txt"))
 info = {"CFBundleName": "Sideport", "CFBundleDisplayName": "Sideport", "CFBundleExecutable": "Sideport",
         "CFBundleIdentifier": "local.adrian.mac-chatgpt.mcpproxy", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "10", "CFBundleIconFile": "Sideport",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "11", "CFBundleIconFile": "Sideport",
         "LSUIElement": True, "LSMinimumSystemVersion": "15.0",
         "NSAppleEventsUsageDescription": "Sideport lets approved remote agents interact with apps on this Mac."}
 (contents / "Info.plist").write_bytes(plistlib.dumps(info))
@@ -82,17 +82,17 @@ for path in app.rglob("*"):
 run(["/usr/bin/xattr", "-cr", str(app)])
 for binary in work.glob("*/*"):
     if binary.read_bytes()[:4].hex() in {"cffaedfe", "cafebabe", "feedfacf", "bebafeca"}:
-        run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(binary)])
+        run(["/usr/bin/codesign", "--force", "--sign", "-", "--options", "restrict,runtime", "--timestamp=none", str(binary)])
 if args.signing:
     identity = json.loads(args.signing.read_text())
     try:
         run(["/usr/bin/security", "unlock-keychain", "-p", identity["password"], identity["keychain"]])
         run(["/usr/bin/codesign", "--force", "--sign", identity["identity"], "--keychain", identity["keychain"],
-             "--requirements", "=" + identity["requirement"], "--timestamp=none", str(app)])
+             "--requirements", "=" + identity["requirement"], "--options", "restrict,runtime", "--timestamp=none", str(app)])
     except RuntimeError as error:
         raise RuntimeError(str(error).replace(identity["password"], "[redacted]")) from None
 else:
-    run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(app)])
+    run(["/usr/bin/codesign", "--force", "--sign", "-", "--options", "restrict,runtime", "--timestamp=none", str(app)])
 run(["/usr/bin/codesign", "--verify", "--strict", "--deep", str(app)])
 state = stage / "isolated-state"
 env = dict(os.environ, SIDEPORT_HOME=str(state))

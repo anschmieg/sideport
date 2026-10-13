@@ -10,9 +10,12 @@ struct RemoteEndpoint {
     guard value.utf8.count <= 2000,
       !value.unicodeScalars.contains(
         where: CharacterSet.whitespacesAndNewlines.union(.controlCharacters).contains),
-      let parts = URLComponents(string: value), let url = parts.url, let host = parts.host,
+      let parts = URLComponents(string: value), let url = parts.url, let encodedHost = parts.host,
       parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil
     else { throw SideportError("Invalid MCP endpoint") }
+    let host =
+      encodedHost.hasPrefix("[") && encodedHost.hasSuffix("]")
+      ? String(encodedHost.dropFirst().dropLast()) : encodedHost
     let local = ["localhost", "127.0.0.1", "::1"].contains(host)
     guard
       (parts.scheme == "https" && (managed || parts.port == nil || parts.port == 443))
@@ -131,12 +134,16 @@ final class RemotePeer: ToolPeer, @unchecked Sendable {
     chmod(config, 0o600)
     try privateWrite(body, input)
     let resolved = address.contains(":") ? "[" + address + "]" : address
+    let pin =
+      endpoint.host.contains(":")
+      ? [] : ["--resolve", endpoint.host + ":" + String(endpoint.port) + ":" + resolved]
     let output = try await supervisor.run(
       "/usr/bin/curl",
       [
         "--disable", "--config", config, "--silent", "--show-error", "--noproxy", "*", "--proto",
-        endpoint.url.scheme == "https" ? "=https" : "=http", "--resolve",
-        endpoint.host + ":" + String(endpoint.port) + ":" + resolved, "--max-time", String(timeout),
+        endpoint.url.scheme == "https" ? "=https" : "=http",
+      ] + pin + [
+        "--max-time", String(timeout),
         "--max-filesize", "4194304", "--include", "--request", "POST", "--data-binary", "@" + input,
         endpoint.url.absoluteString,
       ], environment: ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory()], cwd: scratch,
@@ -204,7 +211,7 @@ final class RemotePeer: ToolPeer, @unchecked Sendable {
       params["_meta"] =
         [
           "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-          "io.modelcontextprotocol/clientInfo": ["name": "Sideport", "version": "0.3.0"],
+          "io.modelcontextprotocol/clientInfo": ["name": "Sideport", "version": "0.3.1"],
           "io.modelcontextprotocol/clientCapabilities": [:],
         ] as JSONObject
     }
@@ -229,7 +236,7 @@ final class RemotePeer: ToolPeer, @unchecked Sendable {
       "initialize",
       [
         "protocolVersion": "2025-11-25", "capabilities": [:],
-        "clientInfo": ["name": "Sideport", "version": "0.3.0"],
+        "clientInfo": ["name": "Sideport", "version": "0.3.1"],
       ], timeout: 30)
     guard let version = result["protocolVersion"] as? String,
       ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"].contains(version)

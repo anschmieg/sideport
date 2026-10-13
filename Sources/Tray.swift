@@ -396,7 +396,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   }
   @objc func about() {
     report(
-      "Early alpha · Version 0.3.0\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
+      "Early alpha · Version 0.3.1\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
     )
   }
   func launch(_ path: String, _ arguments: [String]) throws -> Process {

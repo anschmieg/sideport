@@ -1,8 +1,8 @@
 # Sideport
 
-Native macOS tray app and MCP broker for remote agents. Alpha 0.3.0.
+Native macOS tray app and MCP broker for remote agents. Alpha 0.3.1.
 
-**Release status: held.** The second audit found incomplete computer-tool compatibility and a reproducible detached-process cleanup gap. See [the native audit](Docs/native-audit-2026-10-13.md). Passing the ordinary regression suite does not clear those findings.
+**Release status: ready for alpha testing.** Detached-process cleanup passes adversarial tests. A controlled GUI test confirms working capture/input and refusal of screen/Accessibility access from sandboxed commands. See [the audit follow-up](Docs/native-followup-2026-10-13.md).
 
 | Component | Implementation |
 |---|---|
@@ -23,9 +23,11 @@ swift format lint --strict --recursive Sources Package.swift
 
 `Scripts/package.py --help` documents packaging inputs. It verifies the native runner, app signature, disconnected startup, sandbox, gateway credentials and tunnel interface before exporting a ZIP. Signing identity and runtime keys are external inputs and are never packaged.
 
-Release exports are blocked by `RELEASE_BLOCKERS.json` while the lifecycle finding is open. `--audit-only` can create a signed private test app without exporting a ZIP.
+Release exports are blocked by `RELEASE_BLOCKERS.json` while an audit blocker is open. `--audit-only` can create a signed private test app without exporting a ZIP.
 
 `Scripts/integration.py --help` documents isolated end-to-end checks. `--github` performs authenticated reads and a push dry-run; it does not change remote data. `--npm` tests an audited reference provider. The suite uses synthetic approvals in fresh private test state and never starts a tunnel.
+
+GUI checks require `Scripts/gui_check.py --interactive` with the person present. They use a fixed audit-app path and an exclusive lock. Missing native permissions are checked without capture probes; requesting them requires the separate `--request-permissions` flag. Never loop new GUI builds unattended.
 
 Runtime-only dependency upgrades use release checksums and compatibility checks, with rollback on failure. The compiled automation library updates with a rebuilt app; its version and dependency graph are pinned in Package.swift and Package.resolved.
 

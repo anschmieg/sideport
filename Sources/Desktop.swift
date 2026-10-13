@@ -12,8 +12,16 @@ final class NativeDesktop {
   let observation: DesktopObservationService
   var latest: DesktopObservationResult?
   var observedAt = Date.distantPast
-  var savedClipboard: String?
-  init() {
+  let runtime: RuntimeSupport?
+  let pasteboard: NSPasteboard
+  let clipboardNamespace = UUID().uuidString
+  let clipboard: ClipboardService
+  var clipboardSlots = Set<String>()
+  var requestedNativePermissions = false
+  init(runtime: RuntimeSupport? = nil, pasteboard: NSPasteboard = .general) {
+    self.runtime = runtime
+    self.pasteboard = pasteboard
+    clipboard = ClipboardService(pasteboard: pasteboard, sizeLimit: 1_048_576)
     let logging = LoggingService(subsystem: "local.sideport.automation")
     let capture = ScreenCaptureService(
       loggingService: logging, feedbackClient: NoopAutomationFeedbackClient())
@@ -59,11 +67,13 @@ final class NativeDesktop {
   func encoded<T: Encodable>(_ value: T) throws -> JSONObject {
     try jsonObject(JSONEncoder().encode(value))
   }
-  nonisolated static func preview(_ bytes: Data) throws -> (Data, Int, Int) {
+  nonisolated static func preview(_ bytes: Data, maximum: Int = 2304) throws -> (Data, Int, Int) {
     guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else {
       throw SideportError("Cannot decode captured image")
     }
-    for maximum in [2304, 1600, 1024, 640] {
+    for maximum in Array(Set([maximum, min(maximum, 1600), min(maximum, 1024), min(maximum, 640)]))
+      .sorted(by: >)
+    {
       let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
         kCGImageSourceThumbnailMaxPixelSize: maximum,
@@ -83,114 +93,13 @@ final class NativeDesktop {
   func call(_ tool: String, _ args: JSONObject) async throws -> JSONObject {
     if let extra = try await extra(tool, args) { return extra }
     if tool == "permissions" {
-      return textResult([
-        "screen_recording": await permissions.checkScreenRecordingPermissionLive(forceProbe: true),
-        "accessibility": permissions.checkAccessibilityPermission(),
-        "event_synthesis": permissions.checkPostEventPermission(),
-      ])
+      return textResult(await permissionStatus())
     }
     if ["see", "inspect_ui", "capture", "image", "verify_state"].contains(tool) {
-      let target: DesktopObservationTargetRequest
-      if args["target"] as? String == "screen" {
-        target = .screen(index: args["display_index"] as? Int)
-      } else if let id = args["window_id"] as? UInt32 {
-        target = .windowID(id)
-      } else if let app = args["app"] as? String {
-        target = .app(identifier: app, window: nil)
-      } else {
-        target = .frontmost
-      }
-      let result = try await observation.observe(
-        DesktopObservationRequest(
-          target: target,
-          detection: DesktopDetectionOptions(
-            mode: .accessibilityAndOCR, requiresFreshAccessibilityTree: true),
-          output: DesktopObservationOutputOptions(saveSnapshot: true, includeImageData: true),
-          timeout: DesktopObservationTimeouts(overall: 20, detection: 12, ocr: 8)))
-      latest = result
-      observedAt = Date()
-      var metadata = try encoded(result.withoutImageData())
-      metadata["snapshot_id"] = result.files.publishedSnapshotID ?? result.elements?.snapshotId
-      let (image, width, height) = try Self.preview(result.capture.imageData)
-      metadata["preview"] = [
-        "width": width, "height": height, "format": "jpeg",
-        "guidance":
-          "Preview may be scaled. Use element selectors and original observation bounds for actions.",
-      ]
-      var content = textResult(metadata)["content"] as! [JSONObject]
-      content.append([
-        "type": "image", "mimeType": "image/jpeg", "data": image.base64EncodedString(),
-      ])
-      return ["content": content, "isError": false]
+      return try await capture(tool, args)
     }
-    if tool == "app" {
-      defer {
-        if args["action"] as? String != "list" && args["action"] as? String != "windows" {
-          latest = nil
-        }
-      }
-      switch args["action"] as? String ?? "list" {
-      case "list": return textResult(try encoded(await applications.listApplications()))
-      case "windows":
-        return textResult(
-          try encoded(await applications.listWindows(for: Self.string(args, "app"), timeout: 5)))
-      case "launch":
-        return textResult(
-          try encoded(
-            await applications.launchApplication(
-              request: ApplicationLaunchRequest(
-                applicationIdentifier: Self.string(args, "app"), activates: true))))
-      case "activate":
-        try await applications.activateApplication(identifier: Self.string(args, "app"))
-        return textResult(["completed": true])
-      case "hide":
-        try await applications.hideApplication(identifier: Self.string(args, "app"))
-        return textResult(["completed": true])
-      case "unhide":
-        try await applications.unhideApplication(identifier: Self.string(args, "app"))
-        return textResult(["completed": true])
-      case "quit":
-        return textResult([
-          "completed": try await applications.quitApplication(
-            identifier: Self.string(args, "app"), force: false)
-        ])
-      default: throw SideportError("Unknown application action")
-      }
-    }
-    if tool == "clipboard" {
-      switch args["action"] as? String ?? "read" {
-      case "read", "get", "save":
-        let text = NSPasteboard.general.string(forType: .string) ?? ""
-        guard text.utf8.count <= 1_048_576 else {
-          throw SideportError("Clipboard text exceeds 1 MiB")
-        }
-        if args["action"] as? String == "save" { savedClipboard = text }
-        return textResult(["text": text])
-      case "status": return textResult(["types": NSPasteboard.general.types?.map(\.rawValue) ?? []])
-      case "clear":
-        NSPasteboard.general.clearContents()
-        return textResult(["completed": true])
-      case "write", "set", "restore":
-        let text: String
-        if args["action"] as? String == "restore" {
-          guard let savedClipboard else {
-            throw SideportError("No clipboard text saved this session")
-          }
-          text = savedClipboard
-        } else {
-          guard let value = args["text"] as? String, value.utf8.count <= 32768 else {
-            throw SideportError("Provide clipboard text up to 32 KiB")
-          }
-          text = value
-        }
-        NSPasteboard.general.clearContents()
-        guard NSPasteboard.general.setString(text, forType: .string) else {
-          throw SideportError("Cannot write clipboard")
-        }
-        return textResult(["completed": true])
-      default: throw SideportError("Unknown clipboard action")
-      }
-    }
+    if tool == "app" { return try await application(args) }
+    if tool == "clipboard" { return try await clipboardAction(args) }
     if tool == "sleep" {
       let seconds = args["seconds"] as? Double ?? 1
       guard seconds >= 0, seconds <= 10 else {
@@ -215,9 +124,37 @@ final class NativeDesktop {
     case "type":
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
-      outcome = try await automation.typeWithOutcome(
-        text: Self.string(args, "text"), target: element.id,
-        clearExisting: args["clear"] as? Bool ?? false, typingDelay: 5, snapshotId: snapshot
+      guard let identity = result.target.detectionContext?.windowMutationIdentity,
+        let bounds = result.target.window?.bounds
+      else { throw SideportError("Text input requires an exact window observation") }
+      let text = try Self.string(args, "text")
+      let delay = try Self.typingDelay(args)
+      if args["clear"] as? Bool == true, args["delay_ms"] == nil {
+        // Whole-field replacement has no need for physical shortcuts or input
+        // focus. Only fall back if the driver proves it dispatched no mutation.
+        do {
+          outcome = try await automation.setValueWithOutcome(
+            target: element.id, value: .string(text), snapshotId: snapshot
+          ).outcome
+          break
+        } catch let failure as DesktopActionFailure {
+          guard !failure.outcome.dispatchState.mutationDispatched,
+            failure.outcome.state == .refused,
+            failure.outcome.refusalReason == .operationUnsupported
+          else { throw failure }
+        }
+      }
+      // Bind the receiver before editing. The targeted driver uses Accessibility
+      // text edits or literal Unicode, rather than keyboard-layout key positions.
+      let focused = try await automation.focusExactElementWithOutcome(
+        target: .elementId(element.id), snapshotId: snapshot,
+        expectedWindowIdentity: identity, expectedWindowBounds: bounds)
+      let actions: [TypeAction] =
+        (args["clear"] as? Bool == true ? [.clear] : []) + [.text(text)]
+      outcome = try await automation.typeActionsWithOutcome(
+        actions, cadence: .fixed(milliseconds: delay), snapshotId: snapshot,
+        target: ExactWindowKeyboardTarget(
+          windowIdentity: identity, windowBounds: bounds, focusedElement: focused.payload)
       ).outcome
     case "set_value":
       let element = try Self.select(
@@ -252,30 +189,94 @@ final class NativeDesktop {
       guard (1...100).contains(amount) else { throw SideportError("Invalid scroll amount") }
       outcome = try await automation.scrollWithOutcome(
         ScrollRequest(
-          direction: direction, amount: amount, target: element.id, snapshotId: snapshot)
+          direction: direction, amount: amount, target: element.id,
+          smooth: args["smooth"] as? Bool ?? false, delay: try Self.typingDelay(args),
+          snapshotId: snapshot)
       ).outcome
     case "drag":
-      guard args.keys.allSatisfy({ ["from", "to", "snapshot_id", "duration_ms"].contains($0) })
+      guard
+        args.keys.allSatisfy({
+          ["from", "to", "snapshot_id", "duration_ms", "delivery"].contains($0)
+        })
       else { throw SideportError("Drag accepts element selectors only; coordinates are forbidden") }
+      let delivery = args["delivery"] as? String ?? "foreground"
+      let duration = args["duration_ms"] as? Int ?? 500
+      guard ["foreground", "background"].contains(delivery), (1...10000).contains(duration) else {
+        throw SideportError(
+          "Choose foreground/background drag and a duration of 1...10000 milliseconds")
+      }
       let elements = result.elements?.elements.all ?? []
-      let from = try Self.select(Self.string(args, "from"), from: elements)
-      let to = try Self.select(Self.string(args, "to"), from: elements)
+      let previousFrom = try Self.select(Self.string(args, "from"), from: elements)
+      let previousTo = try Self.select(Self.string(args, "to"), from: elements)
       guard let identity = result.target.detectionContext?.windowMutationIdentity,
-        let bounds = result.target.window?.bounds
+        let window = result.target.window?.windowID, let captureWindow = UInt32(exactly: window),
+        SystemIdentityResolver.validateWindowMutationIdentity(identity)
       else { throw SideportError("Drag requires an exact window observation") }
-      let target = try UIAutomationTarget.ExactWindow(identity: identity, bounds: bounds)
+      if delivery == "foreground" {
+        let windows = WindowManagementService(
+          applicationService: applications, feedbackClient: NoopAutomationFeedbackClient())
+        _ = try await windows.focusWindowActionResult(
+          target: .windowId(Int(window)), expectedIdentity: identity)
+        try await Task.sleep(nanoseconds: 100_000_000)
+      }
+      let fresh = try await observation.observe(
+        DesktopObservationRequest(
+          target: .windowID(captureWindow),
+          detection: DesktopDetectionOptions(
+            mode: .accessibility, requiresFreshAccessibilityTree: true),
+          output: DesktopObservationOutputOptions(saveSnapshot: true),
+          timeout: DesktopObservationTimeouts(overall: 10, detection: 8)))
+      guard let currentIdentity = fresh.target.detectionContext?.windowMutationIdentity,
+        identity.hasSameStableReceipt(as: currentIdentity),
+        let bounds = fresh.target.window?.bounds,
+        let freshID = fresh.files.publishedSnapshotID ?? fresh.elements?.snapshotId
+      else { throw SideportError("Drag target window changed; observe it again") }
+      let current = fresh.elements?.elements.all ?? []
+      let from = try Self.refreshed(previousFrom, from: current)
+      let to = try Self.refreshed(previousTo, from: current)
+      let detection = try await snapshots.getDetectionResult(snapshotId: freshID)
+      let receipt = try SnapshotTargetReceiptPlanner.assemble(
+        snapshotID: freshID, detectionResult: detection
+      ).receipt.requireIdentity()
+      guard let target = receipt.exactWindow,
+        target.identity.hasSameStableReceipt(as: currentIdentity), target.bounds == bounds
+      else { throw SideportError("Fresh drag receipt does not match the observed window") }
       let request = ExactWindowDragRequest(
-        snapshotID: snapshot, target: target,
+        snapshotID: freshID, target: target,
         from: CGPoint(x: from.bounds.midX, y: from.bounds.midY),
         to: CGPoint(x: to.bounds.midX, y: to.bounds.midY),
-        durationMilliseconds: args["duration_ms"] as? Int ?? 500)
+        durationMilliseconds: duration)
       try request.validate()
-      outcome = try await automation.dragExactWindow(request).outcome
+      if delivery == "background" {
+        outcome = try await automation.dragExactWindow(request).outcome
+      } else {
+        guard
+          NSWorkspace.shared.frontmostApplication?.processIdentifier
+            == currentIdentity.ownerProcessIdentifier,
+          SystemIdentityResolver.validateWindowMutationIdentity(currentIdentity)
+        else { throw SideportError("Foreground drag target changed; observe the window again") }
+        outcome = try await automation.dragWithOutcome(
+          DragOperationRequest(
+            from: request.from, to: request.to, duration: duration,
+            steps: 20, modifiers: nil, profile: .linear)
+        ).outcome
+      }
     default: throw SideportError("Unknown computer tool")
     }
     // Every mutation consumes its observation; callers must inspect the resulting UI.
     latest = nil
     return Self.actionResult(outcome, operation: tool)
+  }
+  func close() {
+    latest = nil
+    for slot in clipboardSlots {
+      let name =
+        pasteboard.name.rawValue + ".boo.peekaboo.clipboard.slot." + clipboardNamespace + "-" + slot
+      let saved = NSPasteboard(name: NSPasteboard.Name(name))
+      saved.clearContents()
+      saved.releaseGlobally()
+    }
+    clipboardSlots.removeAll()
   }
   nonisolated static func actionResult(_ outcome: DesktopActionOutcome?, operation: String)
     -> JSONObject

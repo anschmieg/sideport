@@ -24,6 +24,7 @@ parser.add_argument("--dependencies", type=pathlib.Path, required=True)
 parser.add_argument("--npm", action="store_true", help="Audit and run the exact-version reference filesystem server")
 parser.add_argument("--audit-detach", action="store_true", help="Probe deliberate double-fork detachment; always clean up the fixture")
 parser.add_argument("--download-runtime", action="store_true", help="Test fresh optional Node acquisition instead of borrowing the legacy runtime")
+parser.add_argument("--smithery", action="store_true", help="Read existing Smithery connections and forwarded tool schemas; no remote tool is executed")
 parser.add_argument("--github", action="store_true", help="Read-only account lookup and authenticated push dry-run")
 args = parser.parse_args()
 exe = args.executable or args.app / "Contents/MacOS/Sideport"
@@ -169,22 +170,8 @@ try:
     print("PASS: July discovery, 16 tools, complete UTF-8 writes, symlink/controller isolation, shell and computer approval gate", flush=True)
 
     if args.audit_detach:
-        daemon = project / "detachment-probe.py"
-        pidfile, heartbeat = project / "daemon.pid", project / "daemon.heartbeat"
-        daemon.write_text("import os,time\nif os.fork(): os._exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\nopen(" + repr(str(pidfile)) + ", 'w').write(str(os.getpid()))\nfor _ in range(40):\n open(" + repr(str(heartbeat)) + ",'w').write(str(time.monotonic()))\n time.sleep(.25)\n")
-        outcome = broker.call("run_shell", {"cwd": str(project), "command": shlex.quote(shutil.which("python3")) + " " + shlex.quote(str(daemon)), "timeout_seconds": 2})
-        time.sleep(.3)
-        before = heartbeat.read_text() if heartbeat.exists() else ""
-        time.sleep(.6)
-        after = heartbeat.read_text() if heartbeat.exists() else ""
-        alive = bool(before and before != after)
-        detachment_exposed = alive
-        if pidfile.exists():
-            pid = int(pidfile.read_text())
-            identity = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-            if str(daemon) in identity:
-                os.kill(pid, signal.SIGKILL)
-        print("AUDIT: deliberate double-fork " + ("SURVIVED command completion (lifecycle containment gap)" if alive else "was contained"), flush=True)
+        from ownership_checks import exercise
+        exercise(Broker, root, project, session, write, content, shutil.which("python3"))
 
     provider_script = project / "provider.py"
     provider_script.write_text('''import sys,json
@@ -227,6 +214,16 @@ for line in sys.stdin:
         assert json.loads(marker.read_text())["audited"] != "2000-01-01T00:00:00Z"
         assert content(broker.call("stop_server", {"id": admitted["id"]}))["status"] == "stopped"
         print("PASS: audited exact-version npm provider, legacy MCP fallback, approved-folder use and controller refusal", flush=True)
+
+    if args.smithery:
+        listing = content(broker.call("managed_servers", {"manager":"smithery"}))
+        connections = listing["servers"]
+        print("PASS: live Smithery connection discovery (" + str(len(connections)) + " connections)", flush=True)
+        if connections:
+            admitted = content(broker.call("request_managed_server", {"manager":"smithery", "name":connections[0]["name"], "namespace":listing["namespace"], "reason":"Read-only forwarding verification; list schemas only"}, "managed_server"))
+            assert isinstance(admitted["tools"], list)
+            assert content(broker.call("stop_server", {"id":admitted["id"]}))["status"] == "stopped"
+            print("PASS: live Smithery forwarding and tool schema discovery (no remote tool executed)", flush=True)
 
     if args.github:
         read = content(broker.call("run_github", {"cwd": str(project), "args": ["api", "user", "--jq", ".login"]}))

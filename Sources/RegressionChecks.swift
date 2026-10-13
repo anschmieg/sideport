@@ -148,6 +148,15 @@ final class SecurityTests {
     assertTrue(flood.stopped)
     assertAtMost(flood.stdout.count + flood.stderr.count, 1024)
   }
+  func testShutdownRefusesLateExecution() async throws {
+    let supervisor = ChildSupervisor()
+    supervisor.shutdown()
+    do {
+      _ = try await supervisor.run("/usr/bin/true", [], environment: [:], cwd: "/private/tmp")
+      RegressionReport.fail("Closed execution controller admitted a new process")
+    } catch { assertTrue(error.localizedDescription.contains("closed")) }
+    assertEqual(supervisor.count, 0)
+  }
   func testShortRPCMessages() async throws {
     let python = ["/opt/homebrew/bin/python3", "/usr/bin/python3"].first(
       where: FileManager.default.isExecutableFile)!
@@ -344,6 +353,79 @@ final class SecurityTests {
     assertEqual(receipt["status"] as? String, "dispatched_unverified")
     assertTrue(receipt["outcome"] is JSONObject)
   }
+  @MainActor
+  func testComputerCompatibility() async throws {
+    let name = NSPasteboard.Name("sideport-audit-" + UUID().uuidString)
+    let board = NSPasteboard(name: name)
+    let desktop = NativeDesktop(pasteboard: board)
+    defer {
+      desktop.close()
+      board.clearContents()
+      board.releaseGlobally()
+    }
+    let bytes = Data([0, 255, 10, 0, 200])
+    _ = try await desktop.call(
+      "clipboard",
+      ["action": "set", "data_base64": bytes.base64EncodedString(), "uti": "public.data"])
+    _ = try await desktop.call("clipboard", ["action": "save", "slot": "binary"])
+    _ = try await desktop.call("clipboard", ["action": "set", "text": "changed"])
+    _ = try await desktop.call("clipboard", ["action": "restore", "slot": "binary"])
+    assertEqual(board.data(forType: .init("public.data")), bytes)
+    let read = try await desktop.call("clipboard", ["action": "get", "prefer": "public.data"])
+    let metadata = try jsonObject(
+      Data(((read["content"] as! [JSONObject])[0]["text"] as! String).utf8))
+    assertEqual(metadata["data_base64"] as? String, bytes.base64EncodedString())
+    do {
+      _ = try await desktop.call("clipboard", ["action": "save", "slot": "ambiguous.name"])
+      RegressionReport.fail("Unsafe slot alias accepted")
+    } catch {}
+    let launch = try NativeDesktop.launchRequest([
+      "app": "TextEdit", "urls": ["https://example.com"], "new_instance": true, "activate": false,
+    ])
+    assertTrue(launch.createsNewInstance)
+    assertFalse(launch.activates)
+    assertEqual(launch.openURLs.count, 1)
+    assertRefused(try NativeDesktop.launchRequest(["url": "javascript:alert(1)"]))
+    let before = DetectedElement(
+      id: "old", type: .button, label: "Alpha", bounds: CGRect(x: 1, y: 1, width: 20, height: 20))
+    let moved = DetectedElement(
+      id: "new", type: .button, label: "Alpha", bounds: CGRect(x: 50, y: 50, width: 20, height: 20))
+    assertEqual(try NativeDesktop.refreshed(before, from: [moved]).id, "new")
+    assertRefused(try NativeDesktop.refreshed(before, from: []))
+    assertRefused(try NativeDesktop.refreshed(before, from: [moved, moved]))
+    assertRefused(
+      try NativeDesktop.region(["x": 0, "y": 0, "width": Double.infinity, "height": 10]))
+    let tool: JSONObject = [
+      "name": "ping", "description": "Fixture",
+      "inputSchema": ["type": "object", "properties": [:]],
+    ]
+    assertEqual(try ManagedServers.toolListing([tool]).count, 1)
+    assertEqual(try ManagedServers.toolListing(["tools": [tool]]).count, 1)
+    assertRefused(try ManagedServers.toolListing(["result": [tool]]))
+    assertRefused(try ManagedServers.identifier("https://example.com/mcp"))
+    assertRefused(try ManagedServers.identifier("namespace/../private"))
+    for value: Any in [
+      [["id": "fixture"]], ["connections": [["connectionId": "fixture"]]],
+      ["servers": [["name": "fixture"]]],
+    ] { assertEqual(try ManagedServers.connectionListing(value).count, 1) }
+    assertEqual(try RemoteEndpoint("http://[::1]/mcp", managed: true).host, "::1")
+    assertRefused(try RemoteEndpoint("https://[::1]/mcp").resolve())
+  }
+  func testPrivateJobManifestExcludesCredentials() throws {
+    let root = "/private/tmp/sideport-secret-test-" + UUID().uuidString
+    try directory(root)
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let job = try OwnedExecution.prepare(
+      root + "/work/nono-bin/nono", ["run"],
+      environment: [
+        "SIDEPORT_HOME": root, "SIDEPORT_PRIVATE_TEST": "SYNTHETIC-PRIVATE-CREDENTIAL",
+      ], cwd: root)!
+    let value = try String(contentsOfFile: job.1[1] + "/request.json", encoding: .utf8)
+    assertFalse(value.contains("SYNTHETIC-PRIVATE-CREDENTIAL"))
+    let parsed = try jsonObject(Data(value.utf8))
+    assertEqual(parsed["secret_keys"] as? [String], ["SIDEPORT_PRIVATE_TEST"])
+    assertNil((parsed["environment"] as? JSONObject)?["SIDEPORT_PRIVATE_TEST"])
+  }
   func testLegacyRememberedLocationFormat() throws {
     let base = "/private/tmp/sideport-remember-test-" + UUID().uuidString
     let project = base + "/project"
@@ -374,6 +456,7 @@ extension SecurityTests {
     try tests.testRemoteSafety()
     try tests.testPackageAdmission()
     try await tests.testBoundedProcessOutputAndTimeout()
+    try await tests.testShutdownRefusesLateExecution()
     try await tests.testShortRPCMessages()
     try await tests.testDetachedProcessCleanup()
     try await tests.testFastProcessGroupCleanup()
@@ -384,9 +467,11 @@ extension SecurityTests {
     try await tests.testUpdateRollback()
     try tests.testDesktopResponseBoundsAndReceipts()
     try tests.testLegacyRememberedLocationFormat()
+    try await tests.testComputerCompatibility()
+    try tests.testPrivateJobManifestExcludesCredentials()
     guard RegressionReport.failures == 0 else {
       throw SideportError("Native regression checks failed")
     }
-    print("Native regression checks passed: 17 groups")
+    print("Native regression checks passed: 20 groups")
   }
 }

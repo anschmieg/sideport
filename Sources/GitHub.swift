@@ -160,9 +160,11 @@ struct GitHubPlan {
 }
 final class NativeGitHub {
   let runtime: RuntimeSupport
+  let compatible: CompatibleGitHub
   let approvals: LocalApprovals
   init(_ runtime: RuntimeSupport, _ approvals: LocalApprovals) {
     self.runtime = runtime
+    compatible = CompatibleGitHub(runtime)
     self.approvals = approvals
   }
   func call(_ arguments: JSONObject, cwd: String, grants: [Grant]) async throws -> JSONObject {
@@ -190,8 +192,7 @@ final class NativeGitHub {
     }
     let timeout = arguments["timeout_seconds"] as? Double ?? 30
     guard (1...300).contains(timeout) else { throw SideportError("Invalid timeout") }
-    guard let gh = runtime.trustedTools["gh"]
-    else { throw SideportError("Install GitHub CLI through Homebrew first") }
+    let gh = try await compatible.ensure()
     let scratch = runtime.scratch + "/github-" + UUID().uuidString
     try directory(scratch)
     defer { try? FileManager.default.removeItem(atPath: scratch) }
@@ -213,11 +214,11 @@ final class NativeGitHub {
     }
     if plan.approval { allow.append(["method": "*", "path": "/**"]) }
     var credential: JSONObject = [
-      "upstream": "https://api.github.com", "credential_key": "cmd://github", "env_var": "GH_TOKEN",
+      "upstream": "https://api.github.com", "credential_key": "env://SIDEPORT_PRIVATE_GITHUB",
+      "env_var": "GH_TOKEN",
       "credential_format": "Bearer {}",
       "endpoint_policy": ["default": ["decision": "deny"], "allow": allow],
     ]
-    var capture = [gh, "auth", "token", "--hostname", "github.com"]
     var credentialName = "github"
     if let remote = plan.remote, let refspec = plan.refspec {
       guard let developer = runtime.environment["DEVELOPER_DIR"] else {
@@ -246,7 +247,7 @@ final class NativeGitHub {
       let repoPath = (pathname.hasSuffix(".git") ? String(pathname.dropLast(4)) : pathname) + ".git"
       credentialName = "github_git"
       credential = [
-        "upstream": "https://github.com", "credential_key": "cmd://github",
+        "upstream": "https://github.com", "credential_key": "env://SIDEPORT_PRIVATE_GITHUB",
         "env_var": "SIDEPORT_GIT_TOKEN", "inject_header": "Authorization",
         "credential_format": "Basic {}", "inject_mode": "basic_auth",
         "endpoint_policy": [
@@ -257,7 +258,6 @@ final class NativeGitHub {
           ],
         ],
       ]
-      capture = [runtime.context.executable, "--github-credential", gh]
       let bare = scratch + "/push.git"
       try directory(bare + "/refs/heads")
       try directory(bare + "/objects/info")
@@ -309,17 +309,18 @@ final class NativeGitHub {
     profile["filesystem"] = fs
     profile["network"] =
       [
-        "tls_intercept": ["ca_lifecycle": "trusted", "ca_validity": "24h", "leaf_validity": "15m"],
+        "tls_intercept": [
+          "ca_lifecycle": "session", "ca_validity": "24h", "leaf_validity": "15m",
+          "ca_env_vars": ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO"],
+        ],
         "credentials": [credentialName], "custom_credentials": [credentialName: credential],
       ] as JSONObject
-    profile["credential_capture"] =
-      ["github": ["command": capture, "timeout_secs": 10, "cache_ttl_secs": 0]] as JSONObject
     profile["environment"] =
       [
         "allow_vars": [
           "HOME", "PATH", "LANG", "GH_TOKEN", "SIDEPORT_GIT_TOKEN", "HTTP_PROXY", "HTTPS_PROXY",
           "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NONO_PROXY_TOKEN", "SSL_CERT_FILE",
-          "NODE_EXTRA_CA_CERTS",
+          "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO",
         ],
         "set_vars": [
           "GH_CONFIG_DIR": config, "GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1",
@@ -327,9 +328,26 @@ final class NativeGitHub {
           "GIT_CONFIG_NOSYSTEM": "1",
         ],
       ] as JSONObject
+    guard let credentialHelper = runtime.trustedTools["gh"] else {
+      throw SideportError("Local GitHub login is unavailable")
+    }
+    let captured = try await runtime.supervisor.run(
+      credentialHelper, ["auth", "token", "--hostname", "github.com"],
+      environment: [
+        "HOME": runtime.context.home, "PATH": "/usr/bin:/bin",
+        "GH_CONFIG_DIR": runtime.context.home + "/.config/gh",
+      ], cwd: runtime.scratch, timeout: 10, limit: 4096)
+    let token = String(decoding: captured.stdout, as: UTF8.self).trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    guard captured.code == 0, !captured.stopped, !token.isEmpty, token.utf8.count <= 2048,
+      !token.contains(where: \.isWhitespace)
+    else { throw SideportError("Existing GitHub Keychain login is unavailable") }
     return try await runtime.launchProfile(
       profile, executable, executionArgs, cwd: cwd, timeout: timeout,
-      environment: ["GH_CONFIG_DIR": runtime.context.home + "/.config/gh"]
+      environment: [
+        "GH_CONFIG_DIR": runtime.context.home + "/.config/gh",
+        "SIDEPORT_PRIVATE_GITHUB": plan.remote == nil ? token : "x-access-token:" + token,
+      ]
     ).result
   }
   static func credential(_ gh: String) async throws {

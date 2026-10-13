@@ -96,8 +96,17 @@ actor NativeBroker {
             "computer_control", ["tool": "Peekaboo", "version": "4.9.1"],
             NativeDesktop.string(args, "reason", maximum: 500))
         else { return textResult(["status": "denied"]) }
-        desktop = await MainActor.run { NativeDesktop() }
+        desktop = await MainActor.run { NativeDesktop(runtime: runtime) }
         computerAllowed = true
+      }
+      guard let desktop else { throw SideportError("Computer-control service unavailable") }
+      let permissions = try await desktop.requestPermissions()
+      guard permissions.values.allSatisfy({ $0 as? Bool == true }) else {
+        return textResult([
+          "status": "permissions_required", "permissions": permissions,
+          "guidance":
+            "Finish approving Sideport in macOS Privacy & Security, then retry. If permissions are already enabled, disconnect and reconnect Sideport to refresh macOS's cached authorization.",
+        ])
       }
       return textResult([
         "status": "approved", "tools": Self.computerTools,
@@ -129,14 +138,14 @@ actor NativeBroker {
       case "server/discover":
         result = [
           "supportedVersions": ["2026-07-28", "2025-11-25"],
-          "serverInfo": ["name": "Sideport", "version": "0.3.0"], "capabilities": ["tools": [:]],
+          "serverInfo": ["name": "Sideport", "version": "0.3.1"], "capabilities": ["tools": [:]],
         ]
       case "initialize":
         let requested = params["protocolVersion"] as? String ?? ""
         result = [
           "protocolVersion": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
             .contains(requested) ? requested : "2025-11-25",
-          "serverInfo": ["name": "Sideport", "version": "0.3.0"], "capabilities": ["tools": [:]],
+          "serverInfo": ["name": "Sideport", "version": "0.3.1"], "capabilities": ["tools": [:]],
         ]
       case "ping": result = [:]
       case "tools/list": result = ["tools": tools]
@@ -162,9 +171,10 @@ actor NativeBroker {
   }
   func close() async {
     await providers.close()
-    supervisor.stopAll()
+    supervisor.shutdown()
     runtime.close()
     computerAllowed = false
+    await desktop?.close()
     desktop = nil
   }
   nonisolated static var computerTools: [JSONObject] {
@@ -180,6 +190,22 @@ actor NativeBroker {
         ],
       ]
     }
+    let capture: JSONObject = [
+      "app": string, "window_id": ["type": "integer"], "window_title": string,
+      "target": ["type": "string", "enum": ["window", "screen", "all_screens", "menubar"]],
+      "display_index": ["type": "integer", "minimum": 0],
+      "path": string, "format": ["type": "string", "enum": ["png", "jpg", "data"]],
+      "scale": ["type": "string", "enum": ["logical", "1x", "native", "retina", "2x"]],
+      "retina": ["type": "boolean"],
+      "max_dimension": ["type": "integer", "minimum": 320, "maximum": 4096],
+      "region": [
+        "type": "object",
+        "properties": [
+          "x": ["type": "number"], "y": ["type": "number"], "width": ["type": "number"],
+          "height": ["type": "number"],
+        ], "required": ["x", "y", "width", "height"], "additionalProperties": false,
+      ],
+    ]
     let snapshot: JSONObject = ["snapshot_id": string, "target": string]
     return [
       schema(
@@ -198,7 +224,8 @@ actor NativeBroker {
         "dialog", "Inspect a dialog or act on one of its fresh element selectors",
         [
           "action": string, "title": string, "app": string, "snapshot_id": string, "target": string,
-          "text": string,
+          "text": string, "path": string, "filename": string, "button": string,
+          "ensure_expanded": ["type": "boolean"],
         ]),
       schema(
         "move", "Move the pointer to a fresh selected element", snapshot, ["snapshot_id", "target"]),
@@ -207,47 +234,30 @@ actor NativeBroker {
         ["action": string, "id": ["type": "integer"], "snapshot_id": string]),
       schema(
         "image", "Capture an image of a screen or window inline",
-        [
-          "app": string, "window_id": ["type": "integer"],
-          "target": ["type": "string", "enum": ["window", "screen"]],
-          "display_index": ["type": "integer", "minimum": 0],
-        ]),
+        capture),
       schema("permissions", "Check macOS automation permissions", [:]),
       schema(
         "see", "Observe an app window; returns pixels, elements and a fresh snapshot_id",
-        [
-          "app": string, "window_id": ["type": "integer"],
-          "target": ["type": "string", "enum": ["window", "screen"]],
-          "display_index": ["type": "integer", "minimum": 0],
-        ]),
+        capture),
       schema(
         "inspect_ui", "Observe the target window’s accessibility tree and screenshot",
-        [
-          "app": string, "window_id": ["type": "integer"],
-          "target": ["type": "string", "enum": ["window", "screen"]],
-          "display_index": ["type": "integer", "minimum": 0],
-        ]),
+        capture),
       schema(
         "capture", "Capture the current window",
-        [
-          "app": string, "window_id": ["type": "integer"],
-          "target": ["type": "string", "enum": ["window", "screen"]],
-          "display_index": ["type": "integer", "minimum": 0],
-        ]),
+        capture),
       schema(
         "verify_state", "Read the current screen after an action",
-        [
-          "app": string, "window_id": ["type": "integer"],
-          "target": ["type": "string", "enum": ["window", "screen"]],
-          "display_index": ["type": "integer", "minimum": 0],
-        ]),
+        capture),
       schema(
         "click", "Click one element from the latest snapshot",
         snapshot.merging(["click_type": ["type": "string", "enum": ["single", "double", "right"]]])
         { _, new in new }, ["snapshot_id", "target"]),
       schema(
         "type", "Type into a selected element",
-        snapshot.merging(["text": string, "clear": ["type": "boolean"]]) { _, new in new },
+        snapshot.merging([
+          "text": string, "clear": ["type": "boolean"],
+          "delay_ms": ["type": "integer", "minimum": 0, "maximum": 1000],
+        ]) { _, new in new },
         ["snapshot_id", "target", "text"]),
       schema(
         "set_value", "Set an accessibility control value",
@@ -258,10 +268,13 @@ actor NativeBroker {
         ["snapshot_id", "target", "text"]),
       schema(
         "drag",
-        "Drag between two unique element selectors in the same fresh window; coordinates forbidden",
+        "Drag between two unique element selectors in the same fresh window; coordinates forbidden. Foreground delivery supports native Mac drag-and-drop and focuses the target window; background is available for controls that support it. Inspect the result before retrying.",
         [
           "snapshot_id": string, "from": string, "to": string,
           "duration_ms": ["type": "integer", "minimum": 1, "maximum": 10000],
+          "delivery": [
+            "type": "string", "enum": ["foreground", "background"], "default": "foreground",
+          ],
         ], ["snapshot_id", "from", "to"]),
       schema(
         "press", "Press a key combination in the observed window",
@@ -274,6 +287,8 @@ actor NativeBroker {
         snapshot.merging([
           "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
           "amount": ["type": "integer", "minimum": 1, "maximum": 100],
+          "smooth": ["type": "boolean"],
+          "delay_ms": ["type": "integer", "minimum": 0, "maximum": 1000],
         ]) { _, new in new }, ["snapshot_id", "target"]),
       schema(
         "clipboard", "Read or write the system clipboard",
@@ -281,16 +296,22 @@ actor NativeBroker {
           "action": [
             "type": "string",
             "enum": ["read", "write", "get", "set", "clear", "status", "save", "restore"],
-          ], "text": string,
+          ], "text": string, "prefer": string, "outputPath": string, "slot": string,
+          "file_path": string, "data_base64": string, "uti": string, "alsoText": string,
         ]),
       schema(
         "app", "List, launch, activate or quit apps; list their windows",
         [
           "action": [
             "type": "string",
-            "enum": ["list", "windows", "launch", "activate", "quit", "hide", "unhide"],
+            "enum": [
+              "list", "windows", "launch", "open", "relaunch", "activate", "quit", "hide", "unhide",
+            ],
           ],
-          "app": string,
+          "app": string, "url": string, "urls": ["type": "array", "items": string, "maxItems": 8],
+          "activate": ["type": "boolean"], "wait": ["type": "boolean"],
+          "wait_for_window": ["type": "boolean"], "new_instance": ["type": "boolean"],
+          "force": ["type": "boolean"],
         ]),
       schema(
         "sleep", "Wait briefly for an application",
@@ -301,6 +322,37 @@ actor NativeBroker {
 enum NativeFileOperation {
   static func run(_ name: String, _ path: String) throws -> JSONObject {
     switch name {
+    case "read_binary":
+      let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+      guard fd >= 0 else { throw SideportError("Cannot open binary file") }
+      defer { Darwin.close(fd) }
+      var info = stat()
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= 1_048_576
+      else { throw SideportError("Binary read requires a regular file up to 1 MiB") }
+      let bytes =
+        try FileHandle(fileDescriptor: fd, closeOnDealloc: false).read(upToCount: 1_048_577)
+        ?? Data()
+      guard bytes.count <= 1_048_576 else {
+        throw SideportError("Binary read grew beyond its size limit")
+      }
+      return textResult(["data_base64": bytes.base64EncodedString(), "bytes": bytes.count])
+    case "write_binary":
+      var bytes = Data()
+      while let chunk = try FileHandle.standardInput.read(upToCount: 16384), !chunk.isEmpty {
+        guard bytes.count + chunk.count <= 16_777_216 else {
+          throw SideportError("Binary write exceeds 16 MiB")
+        }
+        bytes.append(chunk)
+      }
+      let fd = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+      guard fd >= 0 else { throw SideportError("Cannot open binary destination") }
+      defer { Darwin.close(fd) }
+      var info = stat()
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1,
+        ftruncate(fd, 0) == 0
+      else { throw SideportError("Binary destination must be a regular file with no hard links") }
+      try FileHandle(fileDescriptor: fd, closeOnDealloc: false).write(contentsOf: bytes)
+      return textResult(["path": path, "written_bytes": bytes.count])
     case "read_file":
       let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
       guard fd >= 0 else { throw SideportError("Cannot open file") }

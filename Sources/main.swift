@@ -1,13 +1,104 @@
 import AppKit
+import ApplicationServices
 import Darwin
 import Foundation
 
 signal(SIGPIPE, SIG_IGN)
 let arguments = CommandLine.arguments
+if arguments.count == 3, arguments[1] == "--service-probe",
+  ["com.apple.replayd", "com.apple.windowserver.active"].contains(arguments[2])
+{
+  try? FileHandle.standardOutput.write(
+    contentsOf: jsonData(ProcessProtection.serviceProbe(arguments[2])))
+  exit(0)
+}
+if arguments.count == 3, arguments[1] == "--keychain-probe", UUID(uuidString: arguments[2]) != nil {
+  try? FileHandle.standardOutput.write(
+    contentsOf: jsonData(ProcessProtection.keychainProbe(arguments[2])))
+  exit(0)
+}
+if arguments.count == 2, arguments[1] == "--host-env-fixture" {
+  _ = sleep(20)
+  exit(0)
+}
+if arguments.count == 3, arguments[1] == "--process-env-probe",
+  let pid = arguments[2] == "self" ? getpid() : Int32(arguments[2]), pid > 1
+{
+  try? FileHandle.standardOutput.write(
+    contentsOf: jsonData(ProcessProtection.environmentProbe(pid)))
+  exit(0)
+}
 func fail(_ error: Error) -> Never {
   try? FileHandle.standardError.write(
     contentsOf: Data((secretRedacted(error.localizedDescription) + "\n").utf8))
   exit(1)
+}
+if arguments.contains("--private-env-probe") {
+  let leaked = ProcessInfo.processInfo.environment.contains {
+    $0.key.hasPrefix("SIDEPORT_PRIVATE_") || $0.value.contains("SYNTHETIC-PRIVATE-CREDENTIAL")
+  }
+  do {
+    try FileHandle.standardOutput.write(
+      contentsOf: jsonData([
+        "secret_in_environment": leaked,
+        "secret_in_parent_environment": ProcessProtection.environmentProbe(getppid())[
+          "synthetic_present"] ?? true,
+      ]))
+  } catch { fail(error) }
+  exit(0)
+}
+if arguments.count == 3, arguments[1] == "--gui-fixture" {
+  do { try MainActor.assumeIsolated { try GUIValidation.fixture(arguments[2]) } } catch {
+    fail(error)
+  }
+}
+if arguments.contains("--gui-check") {
+  let app = NSApplication.shared
+  app.setActivationPolicy(.accessory)
+  Task { @MainActor in
+    do {
+      try await GUIValidation.check()
+      exit(0)
+    } catch { fail(error) }
+  }
+  app.run()
+  exit(0)
+}
+if arguments.count == 3, arguments[1] == "--ax-probe", let pid = Int32(arguments[2]) {
+  var windows: CFTypeRef?
+  let status = AXUIElementCopyAttributeValue(
+    AXUIElementCreateApplication(pid), kAXWindowsAttribute as CFString, &windows)
+  let available = status == .success && ((windows as? [AXUIElement])?.isEmpty == false)
+  do { try FileHandle.standardOutput.write(contentsOf: jsonData(["available": available])) } catch {
+    fail(error)
+  }
+  exit(0)
+}
+if arguments.count == 3, arguments[1] == "--screen-probe", let window = UInt32(arguments[2]) {
+  let app = NSApplication.shared
+  app.setActivationPolicy(.accessory)
+  Task { @MainActor in
+    do {
+      let desktop = NativeDesktop()
+      _ = await desktop.permissionStatus()
+      _ = try await desktop.call("image", ["window_id": window])
+      try FileHandle.standardOutput.write(contentsOf: jsonData(["available": true]))
+      exit(0)
+    } catch {
+      try? FileHandle.standardError.write(
+        contentsOf: Data((secretRedacted(error.localizedDescription) + "\n").utf8))
+      try? FileHandle.standardOutput.write(contentsOf: jsonData(["available": false]))
+      exit(1)
+    }
+  }
+  app.run()
+  exit(0)
+}
+if arguments.count == 3, ["--job-client", "--job-guard"].contains(arguments[1]) {
+  do {
+    if arguments[1] == "--job-client" { try OwnedExecution.client(arguments[2]) }
+    try OwnedExecution.guardJob(arguments[2])
+  } catch { fail(error) }
 }
 if arguments.count == 3, arguments[1] == "--clipboard-probe" {
   guard arguments[2].hasPrefix("sideport-audit-"),

@@ -149,6 +149,18 @@ struct DependencyUpdater {
         try FileManager.default.copyItem(atPath: executable, toPath: destination)
       }
       chmod(destination, 0o755)
+      if target.key == "nono" {
+        let signed = try await runner.run(
+          "/usr/bin/codesign",
+          [
+            "--force", "--sign", "-", "--options", "restrict,runtime", "--timestamp=none",
+            destination,
+          ],
+          environment: env, cwd: stage)
+        guard signed.code == 0, ProcessProtection.credentialSafe(destination) else {
+          throw SideportError("Updated proxy could not protect its credential environment")
+        }
+      }
       let check = try await runner.run(
         destination, ["--version"], environment: env, cwd: stage, timeout: 15)
       guard check.code == 0, !check.stopped else {
@@ -318,6 +330,77 @@ enum NativeSelfCheck {
         "SYNTHETIC-PRIVATE-PASTEBOARD")
     else {
       throw SideportError("Shell must not bypass computer-control approval through clipboard IPC")
+    }
+    var credentials = try runtime.profile([])
+    credentials["network"] = [
+      "tls_intercept": ["ca_lifecycle": "session"], "credentials": ["fixture"],
+      "custom_credentials": [
+        "fixture": [
+          "upstream": "https://example.com", "credential_key": "env://SIDEPORT_PRIVATE_TEST",
+          "env_var": "GH_TOKEN", "credential_format": "Bearer {}",
+        ]
+      ],
+    ]
+    credentials["environment"] = ["allow_vars": ["HOME", "PATH", "GH_TOKEN"]]
+    let isolatedCredential = try await runtime.launchProfile(
+      credentials, context.executable, ["--private-env-probe"], cwd: project,
+      environment: ["SIDEPORT_PRIVATE_TEST": "SYNTHETIC-PRIVATE-CREDENTIAL"])
+    guard isolatedCredential.code == 0,
+      try jsonObject(isolatedCredential.stdout)["secret_in_environment"] as? Bool == false,
+      try jsonObject(isolatedCredential.stdout)["secret_in_parent_environment"] as? Bool == false
+    else { throw SideportError("Proxy credentials leaked into the sandboxed environment") }
+    let host = try BackgroundService(
+      supervisor, context.executable, ["--host-env-fixture"],
+      environment: ["SIDEPORT_PRIVATE_TEST": "SYNTHETIC-PRIVATE-CREDENTIAL"], cwd: project)
+    defer { host.close() }
+    let positive = try await supervisor.run(
+      context.executable, ["--process-env-probe", "self"],
+      environment: ["SIDEPORT_PRIVATE_TEST": "SYNTHETIC-PRIVATE-CREDENTIAL"], cwd: project)
+    guard positive.code == 0,
+      try jsonObject(positive.stdout)["synthetic_present"] as? Bool == true
+    else { throw SideportError("Host environment isolation probe lacks a positive control") }
+    let negative = try await runtime.execute(
+      context.executable, ["--process-env-probe", String(host.pid)], cwd: project,
+      approved: context.grants())
+    guard negative.code == 0, try jsonObject(negative.stdout)["synthetic_present"] as? Bool == false
+    else {
+      throw SideportError(
+        "Sandboxed code could read a protected host process's credential environment")
+    }
+    // Query only a nonexistent random service, with authentication UI disabled.
+    // No real Keychain item or password is requested by this probe.
+    let keychainService = UUID().uuidString
+    let hostKeychain = try await supervisor.run(
+      context.executable, ["--keychain-probe", keychainService],
+      environment: ["HOME": context.home], cwd: project)
+    guard hostKeychain.code == 0,
+      try jsonObject(hostKeychain.stdout)["status"] as? Int == -25300
+    else { throw SideportError("Keychain isolation probe lacks a working host control") }
+    let childKeychain = try await runtime.execute(
+      context.executable, ["--keychain-probe", keychainService], cwd: project,
+      approved: context.grants())
+    guard
+      childKeychain.code != 0
+        || (try? jsonObject(childKeychain.stdout))?["status"] as? Int != -25300
+    else {
+      throw SideportError("Sandboxed code could query the login Keychain service")
+    }
+    // Resolving a service does not request recording or capture any pixels.
+    let captureService = "com.apple.replayd"
+    let hostService = try await supervisor.run(
+      context.executable, ["--service-probe", captureService], environment: [:], cwd: project)
+    guard hostService.code == 0, try jsonObject(hostService.stdout)["available"] as? Bool == true
+    else {
+      throw SideportError("Screen-service lookup probe lacks a working host control")
+    }
+    let childService = try await runtime.execute(
+      context.executable, ["--service-probe", captureService], cwd: project,
+      approved: context.grants())
+    guard
+      childService.code != 0
+        || (try? jsonObject(childService.stdout))?["available"] as? Bool != true
+    else {
+      throw SideportError("Sandboxed code could resolve the screen-capture service")
     }
     let configPath = root + "/work/mcpproxy-pilot/config.json"
     try directory(root + "/work/mcpproxy-pilot")

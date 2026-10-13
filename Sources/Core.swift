@@ -148,6 +148,7 @@ struct NativeContext {
       + workEntries.filter { !publicDirectories.contains($0) }.map { work + "/" + $0 }
     return controls + [
       work + "/permission-sessions", work + "/mcpproxy-pilot", work + "/sideport-signing",
+      work + "/owned-execution",
       work + "/approval-reviewer.key", work + "/approval-reviewer.json",
       work + "/tunnel-runtime.key", work + "/mcpproxy-runtime.key", home + "/.ssh",
       home + "/Library/Keychains", home + "/.aws", home + "/.config/gcloud", home + "/.npmrc",
