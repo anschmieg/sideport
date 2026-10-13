@@ -32,6 +32,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   var disconnectItem: NSMenuItem!
   var proxy: Process?
   var tunnel: Process?
+  var controllerLease: ControllerLease?
   var timer: Timer?
   var log: FileHandle?
   var stopping = false
@@ -509,6 +510,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     FileManager.default.createFile(
       atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600])
     do {
+      controllerLease = try ControllerLease(root.path)
       credentialLock.lock()
       credentialCancelled = false
       credentialLock.unlock()
@@ -562,7 +564,9 @@ final class ProxyController: NSObject, NSApplicationDelegate {
       at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     approvalDirectory = directory
     seenRequests.removeAll()
-    var restored = try savedLocations.read().map { $0.grant }.filter { $0["path"] != canonical }
+    var restored = try savedLocations.read().map { $0.grant }.filter {
+      $0["path"] != canonical && ($0["path"].map(safeGrant) ?? false)
+    }
     restored.append(["path": canonical, "kind": "directory", "access": "read_write"])
     try writePrivate(restored, to: directory.appendingPathComponent("grants.json"))
     let configuration = root.appendingPathComponent("work/mcpproxy-pilot/config.json")
@@ -582,11 +586,19 @@ final class ProxyController: NSObject, NSApplicationDelegate {
       _, new in new
     }
     config["mcpServers"] = servers
+    // Sideport does not use MCPProxy’s OS-authenticated admin socket.
+    config["enable_socket"] = false
+    config["enable_code_execution"] = false
+    config["allow_server_add"] = false
+    config["allow_server_remove"] = false
     try writePrivate(config, to: configuration)
   }
   func safeGrant(_ path: String) -> Bool {
     let control = canonicalPath(root.path) ?? root.path
-    return path != control && !path.hasPrefix(control + "/")
+    let code =
+      Bundle.main.bundleURL.path.hasSuffix(".app")
+      ? Bundle.main.bundleURL.path : executable.path
+    return !inside(path, code) && path != control && !path.hasPrefix(control + "/")
       && !control.hasPrefix(path == "/" ? "/" : path + "/")
   }
   func canonicalPath(_ path: String) -> String? {
@@ -1049,6 +1061,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
         self.preparingCredential = false
         try? FileManager.default.removeItem(
           at: self.root.appendingPathComponent("work/mcpproxy-runtime.key"))
+        self.controllerLease = nil
         self.update(message, active: false)
         if self.smoke || self.localSmoke { print("SMOKE: owned services stopped") }
         if self.toggleSmoke {

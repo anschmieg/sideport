@@ -9,6 +9,14 @@ func fail(_ error: Error) -> Never {
     contentsOf: Data((secretRedacted(error.localizedDescription) + "\n").utf8))
   exit(1)
 }
+if arguments.count == 3, arguments[1] == "--clipboard-probe" {
+  guard arguments[2].hasPrefix("sideport-audit-"),
+    UUID(uuidString: String(arguments[2].dropFirst(15))) != nil
+  else { fail(SideportError("Invalid private test clipboard")) }
+  let board = NSPasteboard(name: NSPasteboard.Name(arguments[2]))
+  FileHandle.standardOutput.write(Data((board.string(forType: .string) ?? "").utf8))
+  exit(0)
+}
 if arguments.contains("--regression-tests") {
   Task {
     do {
@@ -118,10 +126,15 @@ if arguments.contains("--broker") {
           }
         }
       }
-      for await object in stream {
-        if let response = await broker.message(object) {
-          try replies.write(contentsOf: jsonData(response) + Data([10]))
+      do {
+        for await object in stream {
+          if let response = await broker.message(object) {
+            try replies.write(contentsOf: jsonData(response) + Data([10]))
+          }
         }
+      } catch {
+        await broker.close()
+        fail(error)
       }
       await broker.close()
       withExtendedLifetime(signalSources) {}

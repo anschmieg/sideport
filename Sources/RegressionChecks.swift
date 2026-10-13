@@ -1,6 +1,8 @@
+import AppKit
 import Darwin
 import Foundation
 import PeekabooAutomationKit
+import PeekabooFoundation
 
 private enum RegressionReport {
   static var failures = 0
@@ -183,6 +185,27 @@ final class SecurityTests {
     }
     assertEqual(runner.count, 0)
   }
+  func testFastProcessGroupCleanup() async throws {
+    let python = ["/opt/homebrew/bin/python3", "/usr/bin/python3"].first(
+      where: FileManager.default.isExecutableFile)!
+    let code =
+      "import os,time\nr,w=os.pipe(); p=os.fork()\nif p:\n os.close(w);os.read(r,1);os._exit(0)\nos.close(r);print(os.getpid(),flush=True);os.write(w,b'x');time.sleep(20)"
+    let runner = ChildSupervisor()
+    let output = try await runner.run(
+      python, ["-c", code], environment: ["PATH": "/usr/bin:/bin"], cwd: "/private/tmp", timeout: 2)
+    let pid = Int32(
+      String(decoding: output.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    )
+    assertTrue(pid != nil)
+    if let pid {
+      var info = proc_bsdinfo()
+      let count = proc_pidinfo(
+        pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+      assertTrue(
+        count == 0 || info.pbi_status == 5, "Fast orphan in the owned process group must exit")
+    }
+    assertEqual(runner.count, 0)
+  }
   func testControllerGrantsAreDeniedAndCanonical() throws {
     let base = "/private/tmp/sideport-test-" + UUID().uuidString
     let root = base + "/control"
@@ -212,6 +235,133 @@ final class SecurityTests {
     assertNil(properties["to_coords"])
     assertEqual(Set(drag["required"] as! [String]), Set(["from", "to", "snapshot_id"]))
   }
+  func testArchivePreflight() async throws {
+    assertEqual(
+      try ReleaseArchive.validate(
+        "dir/\ndir/tool\n", "drwx 0 root wheel 0 date dir/\n-rwx 0 root wheel 1 date dir/tool\n"),
+      ["dir/", "dir/tool"])
+    for (names, rows) in [
+      ("tool\n", "lrwx tool -> /tmp\n"),
+      ("tool\n", "hrwx tool link to other\n"),
+      ("tool\n", "prwx tool\n"),
+      ("../tool\n", "-rwx tool\n"),
+      ("/tool\n", "-rwx tool\n"),
+      ("tool\n./tool\n", "-rwx tool\n-rwx ./tool\n"),
+      ("tool\n", "-rwx tool\n-rwx hidden\n"),
+    ] { assertRefused(try ReleaseArchive.validate(names, rows)) }
+    let base = "/private/tmp/sideport-archive-test-" + UUID().uuidString
+    try directory(base + "/input")
+    try directory(base + "/output")
+    defer { try? FileManager.default.removeItem(atPath: base) }
+    try Data("benign".utf8).write(to: URL(fileURLWithPath: base + "/input/tool"))
+    let runner = ChildSupervisor()
+    let env = ["PATH": "/usr/bin:/bin"]
+    let compressed = try await runner.run(
+      "/usr/bin/tar", ["-czf", base + "/safe.tgz", "tool"], environment: env, cwd: base + "/input")
+    assertEqual(compressed.code, 0)
+    try await ReleaseArchive.extract(base + "/safe.tgz", to: base + "/output", runner: runner)
+    assertEqual(try String(contentsOfFile: base + "/output/tool", encoding: .utf8), "benign")
+    try FileManager.default.createSymbolicLink(
+      atPath: base + "/input/escape", withDestinationPath: base)
+    let malicious = try await runner.run(
+      "/usr/bin/tar", ["-czf", base + "/unsafe.tgz", "escape", "tool"], environment: env,
+      cwd: base + "/input")
+    assertEqual(malicious.code, 0)
+    try directory(base + "/untouched")
+    do {
+      try await ReleaseArchive.extract(
+        base + "/unsafe.tgz", to: base + "/untouched", runner: runner)
+      RegressionReport.fail("Linked archive must be rejected before extraction")
+    } catch {}
+    assertEqual(try FileManager.default.contentsOfDirectory(atPath: base + "/untouched"), [])
+  }
+  func testToolPagination() async throws {
+    let python = ["/opt/homebrew/bin/python3", "/usr/bin/python3"].first(
+      where: FileManager.default.isExecutableFile)!
+    let code =
+      "import sys,json\nfor line in sys.stdin:\n m=json.loads(line); p=m.get('params',{}); r={'tools':[{'name':'second' if 'cursor' in p else 'first','inputSchema':{'type':'object'}}]}; r.update({} if 'cursor' in p else {'nextCursor':'page2'}); print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':r}),flush=True)"
+    let peer = try StdioPeer(
+      ChildSupervisor(), python, ["-u", "-c", code], environment: ["PATH": "/usr/bin:/bin"],
+      cwd: "/private/tmp")
+    defer { peer.close() }
+    assertEqual(try await peer.listTools().map { $0["name"] as! String }, ["first", "second"])
+  }
+  func testUpdateRollback() async throws {
+    let root = "/private/tmp/sideport-update-test-" + UUID().uuidString
+    let work = root + "/work"
+    let stage = root + "/stage"
+    let backup = root + "/backup"
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    for path in [work + "/mcpproxy-bin", work + "/mcpproxy-pilot", stage + "/mcpproxy-bin", backup]
+    { try directory(path) }
+    try Data("original-binary".utf8).write(
+      to: URL(fileURLWithPath: work + "/mcpproxy-bin/mcpproxy"))
+    try Data("original-database".utf8).write(
+      to: URL(fileURLWithPath: work + "/mcpproxy-pilot/config.db"))
+    try Data("replacement-binary".utf8).write(
+      to: URL(fileURLWithPath: stage + "/mcpproxy-bin/mcpproxy"))
+    try privateWrite(["tag_name": "old"], work + "/mcpproxy-release.json")
+    let updater = DependencyUpdater(root: root)
+    do {
+      _ = try await updater.replace(
+        stage: stage, backup: backup, changed: [(DependencyUpdater.targets[0], ["tag_name": "new"])]
+      ) {
+        try Data("simulated-migration".utf8).write(
+          to: URL(fileURLWithPath: work + "/mcpproxy-pilot/config.db"))
+        throw SideportError("Injected compatibility failure")
+      }
+      RegressionReport.fail("Update must roll back when validation fails")
+    } catch {}
+    assertEqual(
+      try String(contentsOfFile: work + "/mcpproxy-bin/mcpproxy", encoding: .utf8),
+      "original-binary")
+    assertEqual(
+      try String(contentsOfFile: work + "/mcpproxy-pilot/config.db", encoding: .utf8),
+      "original-database")
+    assertEqual(
+      try jsonObject(Data(contentsOf: URL(fileURLWithPath: work + "/mcpproxy-release.json")))[
+        "tag_name"] as? String, "old")
+  }
+  func testDesktopResponseBoundsAndReceipts() throws {
+    let space = CGColorSpaceCreateDeviceRGB()
+    let drawing = CGContext(
+      data: nil, width: 4000, height: 2500, bitsPerComponent: 8,
+      bytesPerRow: 4000 * 4, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    drawing.setFillColor(CGColor(gray: 0.5, alpha: 1))
+    drawing.fill(CGRect(x: 0, y: 0, width: 4000, height: 2500))
+    let png = NSBitmapImageRep(cgImage: drawing.makeImage()!).representation(
+      using: .png, properties: [:])!
+    let (jpeg, width, height) = try NativeDesktop.preview(png)
+    assertAtMost(jpeg.count, 524288)
+    assertAtMost(max(width, height), 2304)
+    let outcome = DesktopActionOutcome.dispatchedUnverified(
+      delivery: .init(mechanism: .globalEvents, mode: .foreground), evidence: .deliveryAccepted,
+      unitCount: .one)
+    let result = NativeDesktop.actionResult(outcome, operation: "press")
+    let receipt = try jsonObject(
+      Data(((result["content"] as! [JSONObject])[0]["text"] as! String).utf8))
+    assertEqual(receipt["completed"] as? Bool, false)
+    assertEqual(receipt["status"] as? String, "dispatched_unverified")
+    assertTrue(receipt["outcome"] is JSONObject)
+  }
+  func testLegacyRememberedLocationFormat() throws {
+    let base = "/private/tmp/sideport-remember-test-" + UUID().uuidString
+    let project = base + "/project"
+    try directory(project)
+    defer { try? FileManager.default.removeItem(atPath: base) }
+    let file = URL(fileURLWithPath: base + "/remembered.json")
+    let saved = RememberedLocations(file: file, controller: base + "/controller")
+    try saved.remember(path: project, kind: "directory", access: "read")
+    let state = try jsonObject(Data(contentsOf: file))
+    assertEqual(state["version"] as? Int, 1)
+    let reopened = RememberedLocations(file: file, controller: base + "/controller")
+    assertEqual(try reopened.read().first?.path, project)
+    try reopened.remember(path: project, kind: "directory", access: "read_write")
+    assertEqual(try saved.read().first?.access, "read_write")
+    try FileManager.default.moveItem(atPath: project, toPath: base + "/old-project")
+    try directory(project)
+    assertEqual(try reopened.read().count, 0)
+  }
 }
 
 extension SecurityTests {
@@ -226,11 +376,17 @@ extension SecurityTests {
     try await tests.testBoundedProcessOutputAndTimeout()
     try await tests.testShortRPCMessages()
     try await tests.testDetachedProcessCleanup()
+    try await tests.testFastProcessGroupCleanup()
     try tests.testControllerGrantsAreDeniedAndCanonical()
     tests.testDragSchemaForbidsCoordinates()
+    try await tests.testArchivePreflight()
+    try await tests.testToolPagination()
+    try await tests.testUpdateRollback()
+    try tests.testDesktopResponseBoundsAndReceipts()
+    try tests.testLegacyRememberedLocationFormat()
     guard RegressionReport.failures == 0 else {
       throw SideportError("Native regression checks failed")
     }
-    print("Native regression checks passed: 11 groups")
+    print("Native regression checks passed: 17 groups")
   }
 }

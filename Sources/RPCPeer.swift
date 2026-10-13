@@ -12,6 +12,28 @@ protocol ToolPeer: AnyObject {
   func request(_ method: String, _ params: JSONObject, timeout: Double) async throws -> JSONObject
   func close()
 }
+extension ToolPeer {
+  func listTools() async throws -> [JSONObject] {
+    var tools: [JSONObject] = []
+    var cursors = Set<String>()
+    var parameters: JSONObject = [:]
+    for _ in 0..<32 {
+      let result = try await request("tools/list", parameters, timeout: 30)
+      tools += try NativeProviders.validateTools(result["tools"])
+      guard tools.count <= 1000, try jsonData(tools).count <= 4_194_304 else {
+        throw SideportError("Provider tool listing is too large")
+      }
+      guard let cursor = result["nextCursor"] as? String else {
+        return try NativeProviders.validateTools(tools)
+      }
+      guard !cursor.isEmpty, cursor.utf8.count <= 4096, cursors.insert(cursor).inserted else {
+        throw SideportError("Invalid or repeated provider pagination cursor")
+      }
+      parameters = ["cursor": cursor]
+    }
+    throw SideportError("Provider tool listing has too many pages")
+  }
+}
 final class StdioPeer: ToolPeer, @unchecked Sendable {
   let supervisor: ChildSupervisor
   let input = Pipe(), output = Pipe(), error = Pipe()
@@ -50,10 +72,13 @@ final class StdioPeer: ToolPeer, @unchecked Sendable {
       while let bytes = try? pipeChunk(error.fileHandleForReading), !bytes.isEmpty {}
     }
     DispatchQueue.global().async { [self] in
+      var info = siginfo_t()
+      while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) < 0 && errno == EINTR {}
+      if info.si_pid == pid { supervisor.stopUnreapedChild(pid) }
+      close()
+      supervisor.forget(pid)
       var status: Int32 = 0
       while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
-      supervisor.forget(pid)
-      close()
     }
   }
   var isClosed: Bool {

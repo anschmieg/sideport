@@ -7,16 +7,23 @@ import pathlib
 import select
 import shutil
 import socket
+import shlex
+import threading
+import signal
 import subprocess
 import tempfile
 import time
 import uuid
+import urllib.request
+import urllib.error
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--app", type=pathlib.Path, required=True)
 parser.add_argument("--executable", type=pathlib.Path, help="Test a freshly built executable with the app’s resources")
 parser.add_argument("--dependencies", type=pathlib.Path, required=True)
 parser.add_argument("--npm", action="store_true", help="Audit and run the exact-version reference filesystem server")
+parser.add_argument("--audit-detach", action="store_true", help="Probe deliberate double-fork detachment; always clean up the fixture")
+parser.add_argument("--download-runtime", action="store_true", help="Test fresh optional Node acquisition instead of borrowing the legacy runtime")
 parser.add_argument("--github", action="store_true", help="Read-only account lookup and authenticated push dry-run")
 args = parser.parse_args()
 exe = args.executable or args.app / "Contents/MacOS/Sideport"
@@ -30,6 +37,7 @@ if args.executable:
     exe = runtime / "Sideport"
 env = dict(os.environ, SIDEPORT_HOME=str(root), SIDEPORT_WORKSPACE=str(project), SIDEPORT_APP_EXECUTABLE=str(exe), SIDEPORT_RESOURCES=str(args.app / "Contents/Resources"))
 processes = []
+detachment_exposed = False
 
 def write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +102,15 @@ try:
     destination = project / "large.txt"
     assert content(broker.call("write_file", {"path": str(destination), "content": payload}))["written_bytes"] == len(payload.encode())
     assert content(broker.call("read_file", {"path": str(destination)}))["content"] == payload
+    escaped = project / "escaped.txt"
+    escaped_text = "\\" * 524288
+    assert content(broker.call("write_file", {"path": str(escaped), "content": escaped_text}))["written_bytes"] == len(escaped_text)
+    assert content(broker.call("read_file", {"path": str(escaped)}))["content"] == escaped_text
+    prefix_file = project / "over-limit.txt"
+    prefix_file.write_text("x" * 1100000)
+    prefix = content(broker.call("read_file", {"path": str(prefix_file)}))
+    assert len(prefix["content"]) == 1048576 and prefix["truncated"] is True
+    assert any(entry["name"] == "large.txt" and not entry["directory"] for entry in content(broker.call("list_directory", {"path": str(project)}))["entries"])
     assert broker.call("read_file", {"path": str(sentinel)})["isError"]
     symlink = project / "secret-link"
     symlink.symlink_to(sentinel)
@@ -102,9 +119,72 @@ try:
     assert shell["stdout"] == "shell-ok", shell
     denied = broker.call("run_shell", {"cwd": str(project), "command": "cat " + str(sentinel)})
     assert denied.get("isError") and "SYNTHETIC-CONTROLLER-SENTINEL" not in json.dumps(denied)
+    # A broad approved parent must not make the broker’s own executable writable.
+    write(session / "grants.json", [{"path": str(project), "kind": "directory", "access": "read_write"},
+                                    {"path": str(exe.parent if args.executable else args.app.parent), "kind": "directory", "access": "read_write"}])
+    assert broker.call("write_file", {"path": str(exe), "content": "BROKER-REPLACEMENT"})["isError"]
+    frozen = list((root / "work/host-tools").glob("*/gh"))
+    if frozen:
+        rejected = broker.call("run_shell", {"cwd": str(project), "command": "printf BAD > " + shlex.quote(str(frozen[0]))})
+        assert rejected["isError"], rejected
+    write(session / "grants.json", [{"path": str(project), "kind": "directory", "access": "read_write"}])
+    alias = project / "hardlink"
+    os.link(destination, alias)
+    assert broker.call("write_file", {"path": str(alias), "content": "REPLACEMENT"})["isError"]
+    assert destination.read_text() == payload
+    alias.unlink()
+    # Read-only sandbox probes for Unix sockets, including sockets in approved scope.
+    socket_path = str(project / "admin-probe.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(socket_path)
+    listener.listen(1)
+    listener.settimeout(1)
+    def serve_probe():
+        try:
+            conn, _ = listener.accept()
+            with conn: conn.sendall(b"SYNTHETIC-ADMIN-SOCKET")
+        except (TimeoutError, OSError): pass
+    thread = threading.Thread(target=serve_probe, daemon=True)
+    thread.start()
+    probe = project / "socket-probe.py"
+    probe.write_text("import socket\ns=socket.socket(socket.AF_UNIX);s.connect(" + repr(socket_path) + ");print(s.recv(100).decode())\n")
+    rejected = broker.call("run_shell", {"cwd": str(project), "command": shlex.quote(shutil.which("python3")) + " " + shlex.quote(str(probe))})
+    thread.join(timeout=2)
+    listener.close()
+    assert "exit_code" in json.loads(rejected["content"][0]["text"]), "Socket probe must reach the kernel sandbox"
+    assert rejected["isError"] and "SYNTHETIC-ADMIN-SOCKET" not in json.dumps(rejected), rejected
+    stolen_link = project / "controller-hardlink"
+    link_attempt = broker.call("run_shell", {"cwd": str(project), "command": "ln " + shlex.quote(str(sentinel)) + " " + shlex.quote(str(stolen_link))})
+    assert "exit_code" in json.loads(link_attempt["content"][0]["text"]), "Hard-link probe must reach the kernel sandbox"
+    if stolen_link.exists():
+        exposure = broker.call("read_file", {"path": str(stolen_link)})
+        assert "SYNTHETIC-CONTROLLER-SENTINEL" not in json.dumps(exposure), "Controller credential escaped via a hard link"
+        stolen_link.unlink()
+    else:
+        assert link_attempt.get("isError"), "Controller hard-link creation should be denied"
+    print("PASS: immutable controller/helper code, hard-linked write refusal and kernel Unix-socket isolation", flush=True)
+
     assert broker.call("computer_action", {"tool": "see", "arguments": {}})["isError"]
     assert broker.call("request_remote_server", {"url": "https://127.0.0.1/mcp", "reason": "Synthetic test"})["isError"]
     print("PASS: July discovery, 16 tools, complete UTF-8 writes, symlink/controller isolation, shell and computer approval gate", flush=True)
+
+    if args.audit_detach:
+        daemon = project / "detachment-probe.py"
+        pidfile, heartbeat = project / "daemon.pid", project / "daemon.heartbeat"
+        daemon.write_text("import os,time\nif os.fork(): os._exit(0)\nos.setsid()\nif os.fork(): os._exit(0)\nopen(" + repr(str(pidfile)) + ", 'w').write(str(os.getpid()))\nfor _ in range(40):\n open(" + repr(str(heartbeat)) + ",'w').write(str(time.monotonic()))\n time.sleep(.25)\n")
+        outcome = broker.call("run_shell", {"cwd": str(project), "command": shlex.quote(shutil.which("python3")) + " " + shlex.quote(str(daemon)), "timeout_seconds": 2})
+        time.sleep(.3)
+        before = heartbeat.read_text() if heartbeat.exists() else ""
+        time.sleep(.6)
+        after = heartbeat.read_text() if heartbeat.exists() else ""
+        alive = bool(before and before != after)
+        detachment_exposed = alive
+        if pidfile.exists():
+            pid = int(pidfile.read_text())
+            identity = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+            if str(daemon) in identity:
+                os.kill(pid, signal.SIGKILL)
+        print("AUDIT: deliberate double-fork " + ("SURVIVED command completion (lifecycle containment gap)" if alive else "was contained"), flush=True)
 
     provider_script = project / "provider.py"
     provider_script.write_text('''import sys,json
@@ -129,7 +209,8 @@ for line in sys.stdin:
 
     if args.npm:
         # The optional runtime is borrowed only for this isolated test, never packaged.
-        (root / "work/node").symlink_to(args.dependencies / "node", target_is_directory=True)
+        if not args.download_runtime:
+            (root / "work/node").symlink_to(args.dependencies / "node", target_is_directory=True)
         admitted = content(broker.call("request_server", {"package": "@modelcontextprotocol/server-filesystem", "version": "2026.8.31", "args": [str(project)], "reason": "Synthetic isolated filesystem-provider check"}, "npm_server"))
         assert any(tool["name"]=="list_allowed_directories" for tool in admitted["tools"])
         listing = broker.call("call_server_tool", {"id": admitted["id"], "tool": "list_allowed_directories", "arguments": {}})
@@ -137,6 +218,14 @@ for line in sys.stdin:
         restricted = broker.call("call_server_tool", {"id": admitted["id"], "tool": "read_file", "arguments": {"path": str(sentinel)}})
         assert restricted.get("isError") and "SYNTHETIC-CONTROLLER-SENTINEL" not in json.dumps(restricted), restricted
         assert content(broker.call("stop_server", {"id": admitted["id"]}))["status"]=="stopped"
+        # Expired cached audits must be refreshed without reinstalling the package.
+        marker = next((root / "work/provider-cache").glob("*/approved-install.json"))
+        cached = json.loads(marker.read_text())
+        cached["audited"] = "2000-01-01T00:00:00Z"
+        write(marker, cached)
+        admitted = content(broker.call("request_server", {"package": "@modelcontextprotocol/server-filesystem", "version": "2026.8.31", "args": [str(project)], "reason": "Synthetic cached-advisory refresh check"}, "npm_server"))
+        assert json.loads(marker.read_text())["audited"] != "2000-01-01T00:00:00Z"
+        assert content(broker.call("stop_server", {"id": admitted["id"]}))["status"] == "stopped"
         print("PASS: audited exact-version npm provider, legacy MCP fallback, approved-folder use and controller refusal", flush=True)
 
     if args.github:
@@ -183,6 +272,25 @@ for line in sys.stdin:
             time.sleep(0.1)
     else:
         raise RuntimeError("Guarded local service did not start")
+    run([str(exe), "--credential"], env=env)
+    scoped = (root / "work/mcpproxy-runtime.key").read_text().strip()
+    def denied_rest(route, method="GET", token=None):
+        headers = {"Authorization": "Bearer " + token} if token else {}
+        request = urllib.request.Request("http://127.0.0.1:" + str(port) + route,
+                                         data=b"{}" if method=="POST" else None, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                status = response.status
+        except urllib.error.HTTPError as error:
+            status = error.code
+        assert status in (401,403), "Privileged gateway route accepted an unprivileged request: " + str(status)
+    denied_rest("/api/v1/config")
+    denied_rest("/api/v1/servers/permissions/restart", method="POST", token=scoped)
+    assert json.loads(config_path.read_text())["enable_socket"] is False
+    assert json.loads(config_path.read_text())["enable_code_execution"] is False
+    second = subprocess.run([str(exe), "--toggle-smoke-test-local"], env=env, capture_output=True, text=True, timeout=15)
+    assert "SMOKE FAILED" in second.stderr and "using this controller" in second.stderr, "Second app instance must refuse the active controller"
+    print("PASS: unauthenticated admin refusal, scoped-token mutation refusal, disabled admin socket/code execution and exclusive controller ownership", flush=True)
     (root / "work/mcpproxy-runtime.key").write_text("SYNTHETIC-FORCE-QUIT-CREDENTIAL")
     forced.kill()
     forced.wait(timeout=10)
@@ -200,6 +308,8 @@ for line in sys.stdin:
     assert not still_open and not (root / "work/mcpproxy-runtime.key").exists(), "Force-quit must close the service and remove its credential"
     print("PASS: force-quit closes owned service and removes connection credential",flush=True)
     print("PASS: native tray switch connects and disconnects isolated gateway; no tunnel started, permissions/timers cleared", flush=True)
+    if detachment_exposed:
+        raise RuntimeError("Release blocker: detached agent-started code survived command completion")
 finally:
     for process in processes:
         if process.poll() is None:

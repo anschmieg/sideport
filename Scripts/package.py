@@ -17,7 +17,11 @@ p.add_argument("--dependencies", type=pathlib.Path, required=True, help="Existin
 p.add_argument("--tunnel-runtime", type=pathlib.Path, required=True, help="Verified official runtime-only tunnel release directory")
 p.add_argument("--signing", type=pathlib.Path, help="Private local signing identity JSON; never included in output")
 p.add_argument("--output", type=pathlib.Path, required=True)
+p.add_argument("--audit-only", action="store_true", help="Build/sign/test a private audit app; never export a release ZIP")
 args = p.parse_args()
+readiness = json.loads((REPO / "RELEASE_BLOCKERS.json").read_text())
+if readiness["blockers"] and not args.audit_only:
+    raise SystemExit("Release packaging is held: " + "; ".join(readiness["blockers"]) + " See " + readiness["report"])
 
 def run(command, **kwargs):
     result = subprocess.run(command, capture_output=True, text=True, timeout=600, **kwargs)
@@ -99,6 +103,12 @@ for path in app.rglob("*"):
     if path.name in {"node", "npm", "cloudflared", "peekaboo", "tunnel-runtime.key", "identity.json"} or path.suffix == ".mjs":
         raise RuntimeError("Unexpected runtime or private state in app: " + path.name)
 args.output.parent.mkdir(parents=True, exist_ok=True)
+if args.audit_only:
+    report = {"version": VERSION, "app": str(app), "release_status": readiness["status"],
+              "blockers": readiness["blockers"], "zip": None}
+    args.output.with_suffix(".build.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    raise SystemExit(0)
 run(["/usr/bin/ditto", "-c", "-k", "--norsrc", "--noextattr", "--keepParent", str(app), str(args.output)])
 files = [x for x in app.rglob("*") if x.is_file()]
 report = {"version": VERSION, "app": str(app), "zip": str(args.output),

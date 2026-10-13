@@ -7,6 +7,13 @@ final class RuntimeSupport {
   let scratch: String
   var grants: [Grant] = []
   var environment: [String: String] = [:]
+  var trustedTools: [String: String] = [:]
+  var trustedSourcePaths = [
+    "/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/opt/homebrew/Cellar/gh", "/usr/local/Cellar/gh",
+    "/opt/homebrew/bin/smithery", "/usr/local/bin/smithery",
+    "/opt/homebrew/lib/node_modules/@smithery/cli", "/usr/local/lib/node_modules/@smithery/cli",
+  ]
+  let hostTools: String
   static let excluded = [
     "system_read_macos", "system_write_macos", "user_caches_macos", "node_runtime", "bun_runtime",
     "git_config", "go_runtime", "go_runtime_macos", "homebrew_macos", "java_runtime",
@@ -16,6 +23,40 @@ final class RuntimeSupport {
   init(_ context: NativeContext, _ supervisor: ChildSupervisor) throws {
     self.context = context
     self.supervisor = supervisor
+    trustedSourcePaths.append(context.home + "/.local/bin/smithery")
+    hostTools = context.work + "/host-tools/" + UUID().uuidString
+    try directory(hostTools)
+    // Credential-bearing host invocations must not execute code from an
+    // agent-writable toolchain. Freeze installed helpers before accepting RPC.
+    for name in ["gh", "smithery"] {
+      let candidates =
+        ["/opt/homebrew/bin/" + name, "/usr/local/bin/" + name]
+        + (name == "smithery" ? [context.home + "/.local/bin/smithery"] : [])
+      guard let source = candidates.compactMap({ try? canonical($0, existing: true) }).first else {
+        continue
+      }
+      if name == "gh" {
+        guard
+          GitHubPlan.matches(source, #"^/(opt/homebrew|usr/local)/(Cellar/gh/[^/]+/bin|bin)/gh$"#)
+        else { continue }
+        trustedSourcePaths.append(source)
+        let destination = hostTools + "/gh"
+        try FileManager.default.copyItem(atPath: source, toPath: destination)
+        chmod(destination, 0o500)
+        trustedTools[name] = destination
+      } else {
+        let package = URL(fileURLWithPath: source).deletingLastPathComponent()
+          .deletingLastPathComponent().path
+        guard source == package + "/dist/index.js",
+          let metadata = try? jsonObject(
+            Data(contentsOf: URL(fileURLWithPath: package + "/package.json"))),
+          metadata["name"] as? String == "@smithery/cli"
+        else { continue }
+        trustedSourcePaths.append(package)
+        try FileManager.default.copyItem(atPath: package, toPath: hostTools + "/smithery")
+        trustedTools[name] = hostTools + "/smithery/dist/index.js"
+      }
+    }
     var template = Array("/private/tmp/sideport-native-XXXXXX".utf8CString)
     guard let path = mkdtemp(&template) else {
       throw SideportError("Cannot create sandbox scratch directory")
@@ -67,16 +108,15 @@ final class RuntimeSupport {
       }
     }
     add(scratch, "read_write")
-    if let temp = getenv("TMPDIR"),
-      let actual = try? canonical(String(cString: temp), existing: true),
+    if let actual = try? canonical(NSTemporaryDirectory(), existing: true),
       actual.hasPrefix("/private/var/folders/"), actual.hasSuffix("/T")
     {
       add(actual, "read_write")
     }
     let own = Bundle.main.bundleURL.path
-    add(
-      own.hasSuffix(".app")
-        ? own : URL(fileURLWithPath: context.executable).deletingLastPathComponent().path, "read")
+    let code = own.hasSuffix(".app") ? own : context.codeLocation
+    grants.append(
+      Grant(path: code, kind: code.hasSuffix(".app") ? "directory" : "file", access: "read"))
     environment = [
       "HOME": context.home,
       "PATH": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:" + context.home
@@ -130,7 +170,31 @@ final class RuntimeSupport {
       }
     }
   }
-  func close() { try? FileManager.default.removeItem(atPath: scratch) }
+  func close() {
+    try? FileManager.default.removeItem(atPath: scratch)
+    try? FileManager.default.removeItem(atPath: hostTools)
+  }
+  var codeWriteRules: [String] {
+    // Escape as Seatbelt string literals, never interpolate raw path syntax.
+    let paths = [context.codeLocation, context.work + "/host-tools"] + trustedSourcePaths
+    return paths.map {
+      let quoted = $0.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+      return "(deny file-write* (subpath \"" + quoted + "\"))"
+    } + [
+      "(deny network-outbound (subpath \"/\"))",
+      "(allow network-outbound (path \"/private/var/run/mDNSResponder\"))",
+      "(allow network-outbound (path \"/var/run/mDNSResponder\"))",
+    ]
+      + [
+        "com.apple.windowserver.active", "com.apple.windowserver", "com.apple.WindowServer",
+        "com.apple.coreservices.launchservicesd", "com.apple.tccd", "com.apple.axserver",
+        "com.apple.xpc.launchd",
+        "com.apple.coreservices.uauseractivitypasteboardclient.xpc",
+      ].map { "(deny mach-lookup (global-name \"" + $0 + "\"))" } + [
+        "(deny mach-lookup (global-name-regex \"^com\\\\.apple\\\\.(pasteboard|pboard)(\\\\..*)?$\"))"
+      ]
+  }
   func profile(_ approved: [Grant], extra: [Grant] = [], network: Bool = false, deny: [String] = [])
     throws -> JSONObject
   {
@@ -148,6 +212,7 @@ final class RuntimeSupport {
     }
     return [
       "meta": ["name": "Sideport native sandbox"], "groups": ["exclude": Self.excluded],
+      "unsafe_macos_seatbelt_rules": codeWriteRules,
       "filesystem": filesystem, "network": ["block": !network],
       "security": [
         "signal_mode": "allow_same_sandbox", "process_info_mode": "isolated",
@@ -193,7 +258,8 @@ final class RuntimeSupport {
   }
   func launchProfile(
     _ profile: JSONObject, _ executable: String, _ args: [String], cwd: String,
-    timeout: Double = 30, environment override: [String: String] = [:], input: Data? = nil
+    timeout: Double = 30, environment override: [String: String] = [:], input: Data? = nil,
+    outputLimit: Int = 1_048_576
   ) async throws -> CommandOutput {
     let file = context.session + "/" + UUID().uuidString + ".profile.json"
     try privateWrite(profile, file)
@@ -203,10 +269,12 @@ final class RuntimeSupport {
     env["XDG_CONFIG_HOME"] = context.work + "/nono-config"
     env["XDG_STATE_HOME"] = context.work + "/nono-state"
     env["XDG_CACHE_HOME"] = context.work + "/nono-cache"
+    env["SIDEPORT_HOME"] = context.root
+    env["MAC_CHATGPT_APPROVAL_DIR"] = context.session
     return try await supervisor.run(
       context.work + "/nono-bin/nono",
       ["run", "--silent", "--profile", file, "--no-rollback", "--", executable] + args,
-      environment: env, cwd: cwd, timeout: timeout, inputData: input)
+      environment: env, cwd: cwd, timeout: timeout, limit: outputLimit, inputData: input)
   }
   func execute(
     _ executable: String, _ args: [String], cwd: String, approved: [Grant], network: Bool = false,

@@ -31,11 +31,13 @@ extension NativeDesktop {
       switch args["action"] as? String ?? "list" {
       case "list": return textResult(try serialized(await dock.listDockItems(includeAll: true)))
       case "launch": try await dock.launchFromDock(appName: Self.string(args, "app"))
-      case "menu":
+      case "menu", "right-click":
         try await dock.rightClickDockItem(
           appName: Self.string(args, "app"), menuItem: args["item"] as? String)
       case "hide": try await dock.hideDock()
       case "show": try await dock.showDock()
+      case "add": try await dock.addToDock(path: Self.string(args, "path"), persistent: true)
+      case "remove": try await dock.removeFromDock(appName: Self.string(args, "app"))
       default: throw SideportError("Unknown Dock action")
       }
       latest = nil
@@ -43,7 +45,18 @@ extension NativeDesktop {
     }
     if tool == "dialog" {
       if args["action"] as? String == "click" { return try await call("click", args) }
-      if args["action"] as? String == "type" { return try await call("type", args) }
+      if ["type", "input"].contains(args["action"] as? String ?? "") {
+        return try await call("type", args)
+      }
+      if args["action"] as? String == "dismiss" {
+        var input = args
+        input["keys"] = "escape"
+        return try await call("press", input)
+      }
+      guard ["inspect", "info", "list"].contains(args["action"] as? String ?? "inspect") else {
+        throw SideportError(
+          "Unsupported dialog action; observe the dialog and use its element selectors")
+      }
       let dialog = DialogService(
         applicationService: applications, feedbackClient: NoopAutomationFeedbackClient())
       return textResult(
@@ -61,6 +74,7 @@ extension NativeDesktop {
         return textResult(try serialized(result))
       }
       let (result, _) = try retained(args)
+      defer { latest = nil }
       guard let identity = result.target.detectionContext?.windowMutationIdentity,
         let id = result.target.window?.windowID
       else { throw SideportError("Window actions require a recent exact window observation") }
@@ -72,7 +86,8 @@ extension NativeDesktop {
       case "minimize": try await windows.minimizeWindow(target: target, expectedIdentity: identity)
       case "restore": try await windows.restoreWindow(target: target, expectedIdentity: identity)
       case "maximize": try await windows.maximizeWindow(target: target, expectedIdentity: identity)
-      case "focus": try await windows.focusWindow(target: target)
+      case "focus":
+        _ = try await windows.focusWindowActionResult(target: target, expectedIdentity: identity)
       case "move":
         guard let x = args["x"] as? Double, let y = args["y"] as? Double, x.isFinite, y.isFinite
         else { throw SideportError("Provide finite window coordinates") }
@@ -84,6 +99,14 @@ extension NativeDesktop {
         else { throw SideportError("Provide bounded window dimensions") }
         try await windows.resizeWindow(
           target: target, expectedIdentity: identity, to: CGSize(width: width, height: height))
+      case "set-bounds", "set_bounds":
+        guard let x = args["x"] as? Double, let y = args["y"] as? Double,
+          let width = args["width"] as? Double, let height = args["height"] as? Double,
+          x.isFinite, y.isFinite, width > 0, height > 0, width <= 20000, height <= 20000
+        else { throw SideportError("Provide finite window bounds up to 20000 points") }
+        try await windows.setWindowBounds(
+          target: target, expectedIdentity: identity,
+          bounds: CGRect(x: x, y: y, width: width, height: height))
       default: throw SideportError("Unknown window action")
       }
       latest = nil
@@ -91,6 +114,9 @@ extension NativeDesktop {
     }
     if tool == "move" {
       let (result, _) = try retained(args)
+      guard let identity = result.target.detectionContext?.windowMutationIdentity,
+        SystemIdentityResolver.validateWindowMutationIdentity(identity)
+      else { throw SideportError("Pointer target window changed; observe it again") }
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
       try await automation.moveMouse(
@@ -113,9 +139,12 @@ extension NativeDesktop {
       else { throw SideportError("Unknown Space; list current Spaces first") }
       if action == "switch" {
         try await spaces.switchToSpace(id)
-      } else if action == "move_window" {
+      } else if action == "move_window" || action == "move-window" {
         let (result, _) = try retained(args)
-        guard let window = result.target.window?.windowID else {
+        guard let window = result.target.window?.windowID,
+          let identity = result.target.detectionContext?.windowMutationIdentity,
+          SystemIdentityResolver.validateWindowMutationIdentity(identity)
+        else {
           throw SideportError("Observe the window first")
         }
         try spaces.moveWindowToSpace(windowID: UInt32(window), spaceID: id)

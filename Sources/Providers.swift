@@ -17,6 +17,7 @@ actor NativeProviders {
   let managed: ManagedServers
   var providers: [String: Provider] = [:]
   var admitting = false
+  var closed = false
   init(_ runtime: RuntimeSupport, _ approvals: LocalApprovals) {
     self.runtime = runtime
     self.approvals = approvals
@@ -72,12 +73,11 @@ actor NativeProviders {
   ) async throws -> JSONObject {
     do {
       try await peer.connect()
-      let tools = try Self.validateTools(
-        await peer.request("tools/list", [:], timeout: 30)["tools"]
-      ).filter { tool in
+      let tools = try await peer.listTools().filter { tool in
         let name = tool["name"] as! String
         return (allowed == nil || allowed!.contains(name)) && !(disabled?.contains(name) ?? false)
       }
+      guard !closed else { throw SideportError("Connection closed during server startup") }
       let id = UUID().uuidString
       providers[id] = Provider(
         peer: peer, tools: tools, spec: spec, scratch: scratch, profile: profile)
@@ -119,11 +119,18 @@ actor NativeProviders {
     var transferred = false
     defer { if !transferred { try? FileManager.default.removeItem(atPath: scratch) } }
     let marker = cache + "/approved-install.json"
+    var auditDue = true
     if cached {
       guard let state = try? jsonObject(Data(contentsOf: URL(fileURLWithPath: marker))),
         state["spec"] as? String == spec
       else { throw SideportError("Cached package identity mismatch") }
-    } else {
+      if let timestamp = state["audited"] as? String,
+        let date = ISO8601DateFormatter().date(from: timestamp)
+      {
+        auditDue = !(0..<86400).contains(Date().timeIntervalSince(date))
+      }
+    }
+    if auditDue {
       var installer = try runtime.providerProfile(
         [],
         extra: [
@@ -158,16 +165,18 @@ actor NativeProviders {
         "NPM_CONFIG_CACHE": scratch + "/npm-cache", "NODE_EXTRA_CA_CERTS": scratch + "/trust.pem",
         "TMPDIR": scratch + "/",
       ]
-      let download = try await runtime.launchProfile(
-        installer, executable,
-        [
-          npm, "install", "--ignore-scripts", "--no-fund", "--no-audit", "--save-exact",
-          "--registry=https://registry.npmjs.org", spec,
-        ], cwd: cache, timeout: 120, environment: env)
-      guard download.code == 0, !download.stopped else {
-        throw SideportError(
-          "Package download failed inside the installer sandbox: "
-            + secretRedacted(String(decoding: download.stderr.suffix(2000), as: UTF8.self)))
+      if !cached {
+        let download = try await runtime.launchProfile(
+          installer, executable,
+          [
+            npm, "install", "--ignore-scripts", "--no-fund", "--no-audit", "--save-exact",
+            "--registry=https://registry.npmjs.org", spec,
+          ], cwd: cache, timeout: 120, environment: env)
+        guard download.code == 0, !download.stopped else {
+          throw SideportError(
+            "Package download failed inside the installer sandbox: "
+              + secretRedacted(String(decoding: download.stderr.suffix(2000), as: UTF8.self)))
+        }
       }
       let audit = try await runtime.launchProfile(
         installer, executable,
@@ -235,6 +244,7 @@ actor NativeProviders {
     return result
   }
   func call(_ name: String, _ args: JSONObject) async throws -> JSONObject {
+    guard !closed else { throw SideportError("Connection closed") }
     switch name {
     case "managed_servers": return try await managed.list(args)
     case "request_managed_server":
@@ -286,6 +296,7 @@ actor NativeProviders {
     }
   }
   func close() {
+    closed = true
     for p in providers.values {
       p.peer.close()
       if let profile = p.profile { try? FileManager.default.removeItem(atPath: profile) }

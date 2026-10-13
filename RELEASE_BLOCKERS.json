@@ -1,0 +1,7 @@
+{
+  "status": "held",
+  "blockers": [
+    "Detached agent-started processes can survive cleanup with their sandbox permissions intact."
+  ],
+  "report": "Docs/native-audit-2026-10-13.md"
+}

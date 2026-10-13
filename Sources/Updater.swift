@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Darwin
 import Foundation
@@ -74,6 +75,8 @@ struct DependencyUpdater {
     ]
   }
   func apply() async throws -> JSONObject {
+    let lease = try ControllerLease(root)
+    defer { withExtendedLifetime(lease) {} }
     guard !FileManager.default.fileExists(atPath: work + "/mcpproxy-runtime.key") else {
       throw SideportError("Disconnect before updating")
     }
@@ -122,17 +125,7 @@ struct DependencyUpdater {
         SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined()
           == String((asset["digest"] as! String).dropFirst(7))
       else { throw SideportError("Release checksum mismatch") }
-      let listing = try await runner.run(
-        "/usr/bin/tar", ["-tf", archive], environment: env, cwd: stage, timeout: 15)
-      let entries = String(decoding: listing.stdout, as: UTF8.self).split(separator: "\n")
-      guard listing.code == 0, !entries.isEmpty,
-        entries.allSatisfy({
-          !$0.hasPrefix("/") && !$0.split(separator: "/").contains("..") && !$0.contains("\\")
-        })
-      else { throw SideportError("Unsafe release archive paths") }
-      let extract = try await runner.run(
-        "/usr/bin/tar", ["-xf", archive, "-C", output], environment: env, cwd: stage, timeout: 30)
-      guard extract.code == 0 else { throw SideportError("Archive extraction failed") }
+      try await ReleaseArchive.extract(archive, to: output, runner: runner)
       guard let enumerator = FileManager.default.enumerator(atPath: output) else {
         throw SideportError("Invalid release archive")
       }
@@ -163,33 +156,64 @@ struct DependencyUpdater {
       }
       changed.append((target, release))
     }
-    var swapped: [Target] = []
+    return try await replace(stage: stage, backup: backup, changed: changed) {
+      try await NativeSelfCheck.run(root)
+    }
+  }
+  func replace(
+    stage: String, backup: String, changed: [(Target, JSONObject)],
+    validate: () async throws -> Void
+  ) async throws -> JSONObject {
+    // Preserve the original gateway database when upgrading MCPProxy. The
+    // compatibility check migrates a private clone, never the live database.
+    let upgradingGateway = changed.contains { $0.0.directory == "mcpproxy-bin" }
+    if upgradingGateway {
+      try FileManager.default.copyItem(
+        atPath: work + "/mcpproxy-pilot", toPath: stage + "/mcpproxy-pilot")
+    }
+    var directories = changed.map { $0.0.directory }
+    if upgradingGateway { directories.append("mcpproxy-pilot") }
+    var swapped: [String] = []
     var originalMetadata: [String: Data] = [:]
     do {
       for (target, _) in changed {
-        let current = work + "/" + target.directory
-        let previous = backup + "/" + target.directory
-        try? FileManager.default.removeItem(atPath: previous)
         originalMetadata[target.metadata] = try Data(
           contentsOf: URL(fileURLWithPath: work + "/" + target.metadata))
-        try FileManager.default.moveItem(atPath: current, toPath: previous)
-        swapped.append(target)
-        try FileManager.default.moveItem(atPath: stage + "/" + target.directory, toPath: current)
       }
-      try await NativeSelfCheck.run(root)
+      for item in directories {
+        let current = work + "/" + item
+        let previous = backup + "/" + item
+        try? FileManager.default.removeItem(atPath: previous)
+        try FileManager.default.moveItem(atPath: current, toPath: previous)
+        swapped.append(item)
+        try FileManager.default.moveItem(atPath: stage + "/" + item, toPath: current)
+      }
+      try await validate()
       for (target, release) in changed { try privateWrite(release, work + "/" + target.metadata) }
       return [
         "status": "updated", "components": changed.map { $0.0.key },
         "note": "Compatibility checks passed. Connections remain off.",
       ]
     } catch {
-      for target in swapped.reversed() {
-        try? FileManager.default.removeItem(atPath: work + "/" + target.directory)
-        try? FileManager.default.moveItem(
-          atPath: backup + "/" + target.directory, toPath: work + "/" + target.directory)
-        if let data = originalMetadata[target.metadata] {
-          try? data.write(to: URL(fileURLWithPath: work + "/" + target.metadata), options: .atomic)
-        }
+      var failures: [String] = []
+      for item in swapped.reversed() {
+        do {
+          if FileManager.default.fileExists(atPath: work + "/" + item) {
+            try FileManager.default.removeItem(atPath: work + "/" + item)
+          }
+          try FileManager.default.moveItem(atPath: backup + "/" + item, toPath: work + "/" + item)
+        } catch { failures.append(item) }
+      }
+      for (name, data) in originalMetadata {
+        do {
+          try data.write(to: URL(fileURLWithPath: work + "/" + name), options: .atomic)
+          chmod(work + "/" + name, 0o600)
+        } catch { failures.append(name) }
+      }
+      if !failures.isEmpty {
+        throw SideportError(
+          "Update and rollback failed for " + failures.joined(separator: ", ")
+            + ". Backups remain at " + backup)
       }
       throw SideportError(
         "Update failed compatibility checks; previous dependencies restored: "
@@ -261,8 +285,49 @@ enum NativeSelfCheck {
       "/bin/cat", [root + "/work/controller-test.key"], cwd: project, approved: context.grants())
     guard denied.code != 0, !String(decoding: denied.stdout, as: UTF8.self).contains("private")
     else { throw SideportError("Controller isolation failed") }
+    // Use a private named pasteboard: the user's clipboard is never read or changed.
+    let boardName = "sideport-audit-" + UUID().uuidString
+    let board = NSPasteboard(name: NSPasteboard.Name(boardName))
+    board.clearContents()
+    guard board.setString("SYNTHETIC-PRIVATE-PASTEBOARD", forType: .string) else {
+      throw SideportError("Cannot create private clipboard probe")
+    }
+    defer {
+      board.clearContents()
+      board.releaseGlobally()
+    }
+    var controlProfile = try runtime.profile(context.grants())
+    controlProfile["unsafe_macos_seatbelt_rules"] = runtime.codeWriteRules.filter {
+      !$0.contains("mach-lookup")
+    }
+    let controlClipboard = try await runtime.launchProfile(
+      controlProfile, context.executable, ["--clipboard-probe", boardName], cwd: project)
+    guard
+      String(decoding: controlClipboard.stdout, as: UTF8.self).contains(
+        "SYNTHETIC-PRIVATE-PASTEBOARD")
+    else {
+      throw SideportError(
+        "Private clipboard control probe could not validate IPC isolation (exit \(controlClipboard.code)): "
+          + String(decoding: controlClipboard.stderr.prefix(1500), as: UTF8.self))
+    }
+    let clipboard = try await runtime.execute(
+      context.executable, ["--clipboard-probe", boardName], cwd: project, approved: context.grants()
+    )
+    guard
+      !String(decoding: clipboard.stdout + clipboard.stderr, as: UTF8.self).contains(
+        "SYNTHETIC-PRIVATE-PASTEBOARD")
+    else {
+      throw SideportError("Shell must not bypass computer-control approval through clipboard IPC")
+    }
     let configPath = root + "/work/mcpproxy-pilot/config.json"
     try directory(root + "/work/mcpproxy-pilot")
+    for item in ["config.db", ".token_key", "instance-id"] {
+      let existing = source + "/work/mcpproxy-pilot/" + item
+      if FileManager.default.fileExists(atPath: existing) {
+        try FileManager.default.copyItem(
+          atPath: existing, toPath: root + "/work/mcpproxy-pilot/" + item)
+      }
+    }
     var config = try jsonObject(
       Data(contentsOf: NativeResources.directory.appendingPathComponent("config-template.json")))
     let port = try reservePort()

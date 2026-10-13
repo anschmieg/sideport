@@ -2,12 +2,15 @@
 
 Computer use for remote agents. Early alpha 0.3.0 · Apple Silicon · macOS 15 or later.
 
+This native branch is under review and is not ready to replace the installed app. Deliberately detached commands can survive cleanup with their sandbox permissions still in place. The connection switch closes the tunnel and gateway, but the current implementation cannot guarantee that every command it started has stopped.
+
 - Open Sideport and turn on **Allow connections** to make the Mac available through your existing tunnel.
 - Turn the switch off or quit Sideport to stop access. The app starts disconnected and launches no helper services while off.
 - File and shell tools use your approved folders and development caches. Additional locations require your local decision. **Remember this location** restores an approval when you reconnect.
 - Screen control needs a separate approval. It can interact with apps beyond the file sandbox; it expires when you disconnect. Grant macOS Accessibility, Screen Recording and event-input permissions to Sideport when requested.
 - Ordinary shell commands have network access. Flagged commands use the configured reviewer; low-confidence decisions still ask you. Unknown or destructive authenticated GitHub changes always need your approval.
-- Dynamic npm servers require an exact version and local approval. Install scripts are disabled, high/critical audit findings block startup, and the running server has no network access. Node is downloaded only when this feature needs it.
+- Shell and provider sandboxes block local Unix sockets except the macOS DNS service, and block GUI/clipboard services. Use the separately approved computer tools for graphical tasks.
+- Dynamic npm servers require an exact version and local approval. Install scripts are disabled, high/critical audit findings block admission, and the running server has no network access. Cached audits refresh after a day; unavailable or failing audits block refresh. Node is downloaded only when this feature needs it.
 - Existing agents-dev and Smithery connections can be forwarded after approval. Their configured service credentials are used only for that connection. Sign in to the manager locally first.
 - **Check for updates** updates standalone dependencies with verified checksums and compatibility checks. Peekaboo is compiled into Sideport and updates with the app.
 

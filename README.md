@@ -2,6 +2,8 @@
 
 Native macOS tray app and MCP broker for remote agents. Alpha 0.3.0.
 
+**Release status: held.** The second audit found incomplete computer-tool compatibility and a reproducible detached-process cleanup gap. See [the native audit](Docs/native-audit-2026-10-13.md). Passing the ordinary regression suite does not clear those findings.
+
 | Component | Implementation |
 |---|---|
 | Tray, approvals, broker, forwarding and update checks | Swift |
@@ -20,6 +22,8 @@ swift format lint --strict --recursive Sources Package.swift
 ```
 
 `Scripts/package.py --help` documents packaging inputs. It verifies the native runner, app signature, disconnected startup, sandbox, gateway credentials and tunnel interface before exporting a ZIP. Signing identity and runtime keys are external inputs and are never packaged.
+
+Release exports are blocked by `RELEASE_BLOCKERS.json` while the lifecycle finding is open. `--audit-only` can create a signed private test app without exporting a ZIP.
 
 `Scripts/integration.py --help` documents isolated end-to-end checks. `--github` performs authenticated reads and a push dry-run; it does not change remote data. `--npm` tests an audited reference provider. The suite uses synthetic approvals in fresh private test state and never starts a tunnel.
 

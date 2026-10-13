@@ -73,12 +73,22 @@ struct NativeContext {
   let home = NSHomeDirectory()
   var work: String { root + "/work" }
   var executable: String {
-    ProcessInfo.processInfo.environment["SIDEPORT_APP_EXECUTABLE"] ?? Bundle.main.executablePath
+    let path =
+      ProcessInfo.processInfo.environment["SIDEPORT_APP_EXECUTABLE"] ?? Bundle.main.executablePath
       ?? CommandLine.arguments[0]
+    return (try? canonical(path, existing: true)) ?? path
   }
   var workspace: String {
     ProcessInfo.processInfo.environment["SIDEPORT_WORKSPACE"] ?? home
       + "/Documents/ChatGPT Workspace"
+  }
+  var codeLocation: String {
+    let path = (try? canonical(executable, existing: true)) ?? executable
+    let components = path.components(separatedBy: "/")
+    if let app = components.firstIndex(where: { $0.hasSuffix(".app") }) {
+      return components.prefix(app + 1).joined(separator: "/")
+    }
+    return path
   }
   init(root: String? = nil, session: String? = nil) throws {
     self.root = try canonical(
@@ -93,6 +103,9 @@ struct NativeContext {
     guard !inside(path, root), !inside(root, path) else {
       throw SideportError(
         "This location contains Sideport’s controller or credentials. Choose a separate folder.")
+    }
+    guard !inside(path, codeLocation) else {
+      throw SideportError("Sideport’s application code cannot be granted to an agent")
     }
   }
   func grants() throws -> [Grant] {
@@ -126,7 +139,7 @@ struct NativeContext {
   var denied: [String] {
     let publicDirectories = Set([
       "node", "runtimes", "provider-cache", "nono-bin", "mcpproxy-bin", "tunnel-client",
-      "permission-broker", "baseline",
+      "permission-broker", "baseline", "host-tools",
     ])
     let rootEntries = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
     let workEntries = (try? FileManager.default.contentsOfDirectory(atPath: work)) ?? []
@@ -139,6 +152,7 @@ struct NativeContext {
       work + "/tunnel-runtime.key", work + "/mcpproxy-runtime.key", home + "/.ssh",
       home + "/Library/Keychains", home + "/.aws", home + "/.config/gcloud", home + "/.npmrc",
       home + "/.cargo/credentials", home + "/.cargo/credentials.toml", home + "/.config/gh",
+      home + "/.smithery", home + "/.config/smithery",
     ]
   }
 }

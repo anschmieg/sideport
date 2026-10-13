@@ -190,10 +190,7 @@ final class NativeGitHub {
     }
     let timeout = arguments["timeout_seconds"] as? Double ?? 30
     guard (1...300).contains(timeout) else { throw SideportError("Invalid timeout") }
-    guard
-      let gh = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].compactMap({
-        try? canonical($0, existing: true)
-      }).first, GitHubPlan.matches(gh, #"^/(opt/homebrew|usr/local)/(Cellar/gh/[^/]+/bin|bin)/gh$"#)
+    guard let gh = runtime.trustedTools["gh"]
     else { throw SideportError("Install GitHub CLI through Homebrew first") }
     let scratch = runtime.scratch + "/github-" + UUID().uuidString
     try directory(scratch)
@@ -337,7 +334,9 @@ final class NativeGitHub {
   }
   static func credential(_ gh: String) async throws {
     let actual = try canonical(gh, existing: true)
-    guard GitHubPlan.matches(actual, #"^/(opt/homebrew|usr/local)/(Cellar/gh/[^/]+/bin|bin)/gh$"#)
+    let context = try NativeContext()
+    guard inside(actual, context.work + "/host-tools"), actual == gh,
+      URL(fileURLWithPath: actual).lastPathComponent == "gh"
     else { throw SideportError("Invalid credential helper") }
     let out = try await ChildSupervisor().run(
       actual, ["auth", "token", "--hostname", "github.com"],

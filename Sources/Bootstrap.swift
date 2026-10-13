@@ -23,6 +23,8 @@ enum SideportBootstrap {
     else { throw SideportError("Bundled dependencies are missing") }
     try directory(root)
     try directory(work)
+    let lease = try ControllerLease(root)
+    defer { withExtendedLifetime(lease) {} }
     let lock = work + "/bundle-install.lock"
     let fd = open(lock, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
     guard fd >= 0 else { throw SideportError("Another installation is in progress") }
@@ -39,6 +41,14 @@ enum SideportBootstrap {
       try FileManager.default.copyItem(atPath: resources + "/" + item, toPath: stage + "/" + item)
     }
     var installed: [String] = []
+    let stateFiles = [
+      "mcpproxy-pilot/config.json", "bundle-version.json",
+      "mcpproxy-release.json", "nono-release.json", "tunnel-release.json", "dcg-release.json",
+    ]
+    var originalFiles: [String: Data] = [:]
+    for item in stateFiles where FileManager.default.fileExists(atPath: work + "/" + item) {
+      originalFiles[item] = try Data(contentsOf: URL(fileURLWithPath: work + "/" + item))
+    }
     do {
       for item in payload {
         let current = work + "/" + item
@@ -72,11 +82,31 @@ enum SideportBootstrap {
       }
       try privateWrite(["version": version], marker)
     } catch {
+      var failures: [String] = []
       for item in installed.reversed() {
-        try? FileManager.default.removeItem(atPath: work + "/" + item)
-        if FileManager.default.fileExists(atPath: backup + "/" + item) {
-          try? FileManager.default.moveItem(atPath: backup + "/" + item, toPath: work + "/" + item)
-        }
+        do {
+          if FileManager.default.fileExists(atPath: work + "/" + item) {
+            try FileManager.default.removeItem(atPath: work + "/" + item)
+          }
+          if FileManager.default.fileExists(atPath: backup + "/" + item) {
+            try FileManager.default.moveItem(atPath: backup + "/" + item, toPath: work + "/" + item)
+          }
+        } catch { failures.append(item) }
+      }
+      for item in stateFiles {
+        do {
+          if let previous = originalFiles[item] {
+            try previous.write(to: URL(fileURLWithPath: work + "/" + item), options: .atomic)
+            chmod(work + "/" + item, 0o600)
+          } else if FileManager.default.fileExists(atPath: work + "/" + item) {
+            try FileManager.default.removeItem(atPath: work + "/" + item)
+          }
+        } catch { failures.append(item) }
+      }
+      if !failures.isEmpty {
+        throw SideportError(
+          "Installation rollback failed for " + failures.joined(separator: ", ")
+            + ". Backups remain at " + backup)
       }
       throw error
     }

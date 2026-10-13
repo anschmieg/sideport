@@ -103,11 +103,7 @@ final class ManagedServers {
   func smitheryOutput(_ args: [String], json: Bool = true, supervisor: ChildSupervisor? = nil)
     async throws -> String
   {
-    guard
-      let cli = [
-        "/opt/homebrew/bin/smithery", "/usr/local/bin/smithery",
-        runtime.context.home + "/.local/bin/smithery",
-      ].compactMap({ try? canonical($0, existing: true) }).first
+    guard let cli = runtime.trustedTools["smithery"]
     else { throw SideportError("Install Smithery CLI and sign in locally first") }
     let nodePath = try await node.ensure()
     let out = try await (supervisor ?? runtime.supervisor).run(

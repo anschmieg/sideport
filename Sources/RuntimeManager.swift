@@ -48,18 +48,9 @@ actor OptionalNode {
     try directory(stage)
     defer { try? FileManager.default.removeItem(atPath: stage) }
     let env = ["HOME": context.home, "PATH": "/usr/bin:/bin"]
-    let listing = try await supervisor.run(
-      "/usr/bin/tar", ["-tzf", archive.path], environment: env, cwd: stage, timeout: 30)
     let prefix = "node-v" + Self.version + "-darwin-arm64/"
-    guard listing.code == 0,
-      String(decoding: listing.stdout, as: UTF8.self).split(separator: "\n").allSatisfy({
-        $0.hasPrefix(prefix) && !$0.split(separator: "/").contains("..")
-      })
-    else { throw SideportError("Invalid runtime archive paths") }
-    let extraction = try await supervisor.run(
-      "/usr/bin/tar", ["-xzf", archive.path, "-C", stage], environment: env, cwd: stage, timeout: 30
-    )
-    guard extraction.code == 0 else { throw SideportError("Runtime extraction failed") }
+    try await ReleaseArchive.extract(
+      archive.path, to: stage, runner: supervisor, ignoringNodeBinLinks: true)
     try directory(context.work + "/runtimes")
     try FileManager.default.moveItem(
       atPath: stage + "/" + String(prefix.dropLast()), toPath: cached)

@@ -4,8 +4,8 @@
   "activity_max_response_size": 65536,
   "activity_retention_days": 90,
   "aggregate_upstream_prompts": false,
-  "allow_server_add": true,
-  "allow_server_remove": true,
+  "allow_server_add": false,
+  "allow_server_remove": false,
   "api_key": "",
   "call_tool_timeout": "2m0s",
   "check_server_repo": true,
@@ -49,7 +49,7 @@
   },
   "enable_code_execution": false,
   "enable_prompts": true,
-  "enable_socket": true,
+  "enable_socket": false,
   "environment": {
     "allowed_system_vars": [
       "PATH",

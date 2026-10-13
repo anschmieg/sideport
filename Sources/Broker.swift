@@ -52,11 +52,11 @@ actor NativeBroker {
       else { throw SideportError("Provide UTF-8 content up to 512 KiB") }
       let output = try await runtime.launchProfile(
         runtime.profile(grants), context.executable, ["--file-operation", name, path],
-        cwd: runtime.scratch, timeout: 10, input: Data(content.utf8))
+        cwd: runtime.scratch, timeout: 10, input: Data(content.utf8), outputLimit: 8_388_608)
       guard output.code == 0, !output.stopped else {
         throw SideportError("File operation refused by the operating-system sandbox")
       }
-      return try jsonObject(output.stdout)
+      return try jsonObject(output.stdout, limit: 8_388_608)
     case "run_shell", "run_github":
       let cwd = try canonical(NativeDesktop.string(args, "cwd"), existing: true)
       let grants = try context.grants()
@@ -193,7 +193,7 @@ actor NativeBroker {
         ["action": string, "app": string, "path": string, "title": string]),
       schema(
         "dock", "List or interact with Dock items",
-        ["action": string, "app": string, "item": string]),
+        ["action": string, "app": string, "item": string, "path": string]),
       schema(
         "dialog", "Inspect a dialog or act on one of its fresh element selectors",
         [
@@ -277,11 +277,19 @@ actor NativeBroker {
         ]) { _, new in new }, ["snapshot_id", "target"]),
       schema(
         "clipboard", "Read or write the system clipboard",
-        ["action": ["type": "string", "enum": ["read", "write"]], "text": string]),
+        [
+          "action": [
+            "type": "string",
+            "enum": ["read", "write", "get", "set", "clear", "status", "save", "restore"],
+          ], "text": string,
+        ]),
       schema(
         "app", "List, launch, activate or quit apps; list their windows",
         [
-          "action": ["type": "string", "enum": ["list", "windows", "launch", "activate", "quit"]],
+          "action": [
+            "type": "string",
+            "enum": ["list", "windows", "launch", "activate", "quit", "hide", "unhide"],
+          ],
           "app": string,
         ]),
       schema(
@@ -298,18 +306,30 @@ enum NativeFileOperation {
       guard fd >= 0 else { throw SideportError("Cannot open file") }
       defer { Darwin.close(fd) }
       var info = stat()
-      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= 1_048_576
-      else { throw SideportError("Read requires a regular file up to 1 MiB") }
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG
+      else { throw SideportError("Read requires a regular file") }
       let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-      let data = try handle.read(upToCount: 1_048_577) ?? Data()
-      guard data.count <= 1_048_576, let value = String(data: data, encoding: .utf8) else {
-        throw SideportError("File must be UTF-8 and at most 1 MiB")
+      var data = try handle.read(upToCount: 1_048_576) ?? Data()
+      let truncated = info.st_size > data.count
+      if truncated {
+        for _ in 0..<3 where String(data: data, encoding: .utf8) == nil { data.removeLast() }
       }
-      return textResult(["path": path, "content": value])
+      guard let value = String(data: data, encoding: .utf8) else {
+        throw SideportError("File must be UTF-8")
+      }
+      return textResult([
+        "path": path, "content": value, "truncated": truncated, "read_bytes": data.count,
+      ])
     case "list_directory":
       let entries = try FileManager.default.contentsOfDirectory(atPath: path)
       guard entries.count <= 10000 else { throw SideportError("Directory listing too large") }
-      return textResult(["path": path, "entries": entries.sorted()])
+      let listing = entries.sorted().map { entry -> JSONObject in
+        let type =
+          (try? FileManager.default.attributesOfItem(atPath: path + "/" + entry))?[.type]
+          as? FileAttributeType
+        return ["name": entry, "directory": type == .typeDirectory]
+      }
+      return textResult(["path": path, "entries": listing])
     case "write_file":
       var bytes = Data()
       while let chunk = try FileHandle.standardInput.read(upToCount: 16384), !chunk.isEmpty {
@@ -323,8 +343,10 @@ enum NativeFileOperation {
       guard fd >= 0 else { throw SideportError("Cannot open destination") }
       defer { Darwin.close(fd) }
       var info = stat()
-      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, ftruncate(fd, 0) == 0 else {
-        throw SideportError("Destination must be a regular file")
+      guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1,
+        ftruncate(fd, 0) == 0
+      else {
+        throw SideportError("Destination must be a regular file with no hard links")
       }
       try FileHandle(fileDescriptor: fd, closeOnDealloc: false).write(
         contentsOf: Data(content.utf8))

@@ -59,6 +59,16 @@ final class ChildSupervisor: @unchecked Sendable {
     }
     for (child, receipt) in known where identity(child) == receipt { kill(child, SIGKILL) }
   }
+  // waitid(WNOWAIT) proves this is still our unreaped child, so its PID
+  // cannot be recycled. Zombie proc_pidinfo may be unavailable; kill the
+  // reserved process group before waitpid releases that identity.
+  func stopUnreapedChild(_ pid: pid_t) {
+    lock.lock()
+    let owned = children.contains(pid)
+    lock.unlock()
+    if owned { kill(-pid, SIGKILL) }
+    stop(pid)
+  }
   func forget(_ pid: pid_t) {
     stop(pid)
     lock.lock()
@@ -236,14 +246,21 @@ final class ChildSupervisor: @unchecked Sendable {
           DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
           var status: Int32 = 0
           var descendants: [pid_t: ProcessIdentity] = [:]
+          var unreaped = false
           while true {
             self.collectDescendants(pid, into: &descendants)
-            let result = waitpid(pid, &status, WNOHANG)
-            if result == pid || (result < 0 && errno != EINTR) { break }
+            var info = siginfo_t()
+            let result = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+            if info.si_pid == pid {
+              unreaped = true
+              break
+            }
+            if result < 0 && errno != EINTR { break }
             usleep(20_000)
           }
           timer.cancel()
-          self.stop(pid)
+          if unreaped { self.stopUnreapedChild(pid) } else { self.stop(pid) }
+          while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
           for (child, identity) in descendants {
             if self.identity(child) == identity { kill(child, SIGKILL) }
           }
@@ -331,9 +348,12 @@ final class BackgroundService {
       }
     }
     DispatchQueue.global().async { [self] in
+      var info = siginfo_t()
+      while waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) < 0 && errno == EINTR {}
+      if info.si_pid == pid { supervisor.stopUnreapedChild(pid) }
+      supervisor.forget(pid)
       var status: Int32 = 0
       while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
-      supervisor.forget(pid)
     }
   }
   func close() { supervisor.stop(pid) }

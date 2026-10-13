@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import PeekabooAutomationKit
 import PeekabooFoundation
 
@@ -11,6 +12,7 @@ final class NativeDesktop {
   let observation: DesktopObservationService
   var latest: DesktopObservationResult?
   var observedAt = Date.distantPast
+  var savedClipboard: String?
   init() {
     let logging = LoggingService(subsystem: "local.sideport.automation")
     let capture = ScreenCaptureService(
@@ -57,6 +59,27 @@ final class NativeDesktop {
   func encoded<T: Encodable>(_ value: T) throws -> JSONObject {
     try jsonObject(JSONEncoder().encode(value))
   }
+  nonisolated static func preview(_ bytes: Data) throws -> (Data, Int, Int) {
+    guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else {
+      throw SideportError("Cannot decode captured image")
+    }
+    for maximum in [2304, 1600, 1024, 640] {
+      let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceThumbnailMaxPixelSize: maximum,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+      ]
+      guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+      else { continue }
+      let bitmap = NSBitmapImageRep(cgImage: image)
+      if let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.7]),
+        jpeg.count <= 524288
+      {
+        return (jpeg, image.width, image.height)
+      }
+    }
+    throw SideportError("Captured image exceeds the connection’s response limit")
+  }
   func call(_ tool: String, _ args: JSONObject) async throws -> JSONObject {
     if let extra = try await extra(tool, args) { return extra }
     if tool == "permissions" {
@@ -88,16 +111,24 @@ final class NativeDesktop {
       observedAt = Date()
       var metadata = try encoded(result.withoutImageData())
       metadata["snapshot_id"] = result.files.publishedSnapshotID ?? result.elements?.snapshotId
+      let (image, width, height) = try Self.preview(result.capture.imageData)
+      metadata["preview"] = [
+        "width": width, "height": height, "format": "jpeg",
+        "guidance":
+          "Preview may be scaled. Use element selectors and original observation bounds for actions.",
+      ]
       var content = textResult(metadata)["content"] as! [JSONObject]
-      if result.capture.imageData.count <= 8_388_608 {
-        content.append([
-          "type": "image", "mimeType": "image/png",
-          "data": result.capture.imageData.base64EncodedString(),
-        ])
-      }
+      content.append([
+        "type": "image", "mimeType": "image/jpeg", "data": image.base64EncodedString(),
+      ])
       return ["content": content, "isError": false]
     }
     if tool == "app" {
+      defer {
+        if args["action"] as? String != "list" && args["action"] as? String != "windows" {
+          latest = nil
+        }
+      }
       switch args["action"] as? String ?? "list" {
       case "list": return textResult(try encoded(await applications.listApplications()))
       case "windows":
@@ -112,6 +143,12 @@ final class NativeDesktop {
       case "activate":
         try await applications.activateApplication(identifier: Self.string(args, "app"))
         return textResult(["completed": true])
+      case "hide":
+        try await applications.hideApplication(identifier: Self.string(args, "app"))
+        return textResult(["completed": true])
+      case "unhide":
+        try await applications.unhideApplication(identifier: Self.string(args, "app"))
+        return textResult(["completed": true])
       case "quit":
         return textResult([
           "completed": try await applications.quitApplication(
@@ -122,9 +159,30 @@ final class NativeDesktop {
     }
     if tool == "clipboard" {
       switch args["action"] as? String ?? "read" {
-      case "read": return textResult(["text": NSPasteboard.general.string(forType: .string) ?? ""])
-      case "write":
-        let text = try Self.string(args, "text")
+      case "read", "get", "save":
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        guard text.utf8.count <= 1_048_576 else {
+          throw SideportError("Clipboard text exceeds 1 MiB")
+        }
+        if args["action"] as? String == "save" { savedClipboard = text }
+        return textResult(["text": text])
+      case "status": return textResult(["types": NSPasteboard.general.types?.map(\.rawValue) ?? []])
+      case "clear":
+        NSPasteboard.general.clearContents()
+        return textResult(["completed": true])
+      case "write", "set", "restore":
+        let text: String
+        if args["action"] as? String == "restore" {
+          guard let savedClipboard else {
+            throw SideportError("No clipboard text saved this session")
+          }
+          text = savedClipboard
+        } else {
+          guard let value = args["text"] as? String, value.utf8.count <= 32768 else {
+            throw SideportError("Provide clipboard text up to 32 KiB")
+          }
+          text = value
+        }
         NSPasteboard.general.clearContents()
         guard NSPasteboard.general.setString(text, forType: .string) else {
           throw SideportError("Cannot write clipboard")
@@ -142,6 +200,8 @@ final class NativeDesktop {
       return textResult(["completed": true])
     }
     let (result, snapshot) = try retained(args)
+    defer { latest = nil }
+    var outcome: DesktopActionOutcome?
     switch tool {
     case "click":
       let element = try Self.select(
@@ -149,34 +209,39 @@ final class NativeDesktop {
       let click: ClickType =
         args["click_type"] as? String == "right"
         ? .right : args["click_type"] as? String == "double" ? .double : .single
-      try await automation.click(
-        target: .elementId(element.id), clickType: click, snapshotId: snapshot)
+      outcome = try await automation.clickWithOutcome(
+        target: .elementId(element.id), clickType: click, snapshotId: snapshot
+      ).outcome
     case "type":
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
-      try await automation.type(
+      outcome = try await automation.typeWithOutcome(
         text: Self.string(args, "text"), target: element.id,
-        clearExisting: args["clear"] as? Bool ?? false, typingDelay: 5, snapshotId: snapshot)
+        clearExisting: args["clear"] as? Bool ?? false, typingDelay: 5, snapshotId: snapshot
+      ).outcome
     case "set_value":
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
-      _ = try await automation.setValue(
-        target: element.id, value: .string(Self.string(args, "value")), snapshotId: snapshot)
+      outcome = try await automation.setValueWithOutcome(
+        target: element.id, value: .string(Self.string(args, "value")), snapshotId: snapshot
+      ).outcome
     case "select_text":
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
-      _ = try await automation.selectText(
+      outcome = try await automation.selectText(
         target: element.id,
         request: TextSelectionRequest(
           text: Self.string(args, "text"), prefix: args["prefix"] as? String,
-          suffix: args["suffix"] as? String), snapshotId: snapshot)
+          suffix: args["suffix"] as? String), snapshotId: snapshot
+      ).outcome
     case "press", "paste":
       guard let identity = result.target.detectionContext?.windowMutationIdentity,
         let bounds = result.target.window?.bounds
       else { throw SideportError("Keyboard input requires an exact window observation") }
-      _ = try await automation.hotkeyWithOutcome(
+      outcome = try await automation.hotkeyWithOutcome(
         keys: tool == "paste" ? "cmd+v" : Self.string(args, "keys", maximum: 200), holdDuration: 50,
-        expectedWindowIdentity: identity, expectedWindowBounds: bounds)
+        expectedWindowIdentity: identity, expectedWindowBounds: bounds
+      ).outcome
     case "scroll":
       let element = try Self.select(
         Self.string(args, "target"), from: result.elements?.elements.all ?? [])
@@ -185,9 +250,10 @@ final class NativeDesktop {
       }
       let amount = args["amount"] as? Int ?? 3
       guard (1...100).contains(amount) else { throw SideportError("Invalid scroll amount") }
-      try await automation.scroll(
+      outcome = try await automation.scrollWithOutcome(
         ScrollRequest(
-          direction: direction, amount: amount, target: element.id, snapshotId: snapshot))
+          direction: direction, amount: amount, target: element.id, snapshotId: snapshot)
+      ).outcome
     case "drag":
       guard args.keys.allSatisfy({ ["from", "to", "snapshot_id", "duration_ms"].contains($0) })
       else { throw SideportError("Drag accepts element selectors only; coordinates are forbidden") }
@@ -204,13 +270,27 @@ final class NativeDesktop {
         to: CGPoint(x: to.bounds.midX, y: to.bounds.midY),
         durationMilliseconds: args["duration_ms"] as? Int ?? 500)
       try request.validate()
-      _ = try await automation.dragExactWindow(request)
+      outcome = try await automation.dragExactWindow(request).outcome
     default: throw SideportError("Unknown computer tool")
     }
     // Every mutation consumes its observation; callers must inspect the resulting UI.
     latest = nil
-    return textResult([
-      "completed": true, "next": "Observe the updated window before the next action",
-    ])
+    return Self.actionResult(outcome, operation: tool)
+  }
+  nonisolated static func actionResult(_ outcome: DesktopActionOutcome?, operation: String)
+    -> JSONObject
+  {
+    var receipt: JSONObject = [
+      "completed": outcome?.state == .confirmedChange || outcome?.state == .confirmedNoChange,
+      "status": outcome?.state.rawValue ?? "unverified",
+      "next": ActionOutcomeHumanRenderer.statusLine(for: outcome, operation: operation),
+    ]
+    if let outcome, let bytes = try? JSONEncoder().encode(outcome),
+      let encoded = try? jsonObject(bytes)
+    {
+      receipt["outcome"] = encoded
+    }
+    return textResult(receipt, error: outcome?.state == .refused || outcome?.state == .partial)
+
   }
 }
