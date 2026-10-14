@@ -1,9 +1,10 @@
 import AppKit
 import Darwin
 
-// Gateway presence is separate from tunnel readiness. Only current, active
-// sessions authenticated by Sideport's scoped token count as remote agents.
+// The gateway retains "active" records after stateless requests. These are
+// authenticated activity observations, not a count of connected agents.
 enum AgentPresence {
+  static let activityLifetime: TimeInterval = 120
   static func name(_ raw: String?) -> String {
     let cleaned = (raw ?? "").unicodeScalars.filter {
       !CharacterSet.controlCharacters.contains($0)
@@ -14,24 +15,33 @@ enum AgentPresence {
       in: .whitespacesAndNewlines)
     return value.isEmpty ? "Remote agent" : String(value.prefix(48))
   }
-  static func clients(_ response: JSONObject, since: Date) -> [String] {
+  static func clients(_ response: JSONObject, since: Date, now: Date = Date()) -> [String] {
     let data = response["data"] as? JSONObject ?? response
     let rows = data["sessions"] as? [JSONObject] ?? []
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    func date(_ raw: String) -> Date? {
+      if let date = formatter.date(from: raw) { return date }
+      formatter.formatOptions = [.withInternetDateTime]
+      let date = formatter.date(from: raw)
+      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      return date
+    }
+    var seen = Set<String>()
     return rows.prefix(100).compactMap { row in
       guard row["status"] as? String == "active",
         row["token_name"] as? String == "mac-chatgpt-session",
-        let start = row["start_time"] as? String
+        let start = row["start_time"] as? String,
+        let activity = row["last_activity"] as? String
       else { return nil }
-      var date = formatter.date(from: start)
-      if date == nil {
-        formatter.formatOptions = [.withInternetDateTime]
-        date = formatter.date(from: start)
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-      }
-      guard let date, date >= since else { return nil }
-      return name(row["client_name"] as? String)
+      guard let started = date(start), started >= since,
+        let lastActivity = date(activity), lastActivity >= started,
+        now.timeIntervalSince(lastActivity) >= 0,
+        now.timeIntervalSince(lastActivity) < activityLifetime
+      else { return nil }
+      let label = name(row["client_name"] as? String)
+      guard seen.insert(label).inserted else { return nil }
+      return label
     }
   }
   static func desktopActive(_ state: JSONObject, now: Date = Date()) -> Bool {
@@ -46,38 +56,59 @@ enum AgentPresence {
 }
 
 enum SideportGlyph {
+  // Match the recording indicator reference rather than an appearance-dependent
+  // semantic orange, which became yellow-orange in the selected menu item.
+  static let activityColor = NSColor(
+    srgbRed: 1, green: 146.0 / 255, blue: 48.0 / 255, alpha: 1)
   static func image(connected: Bool) -> NSImage {
-    let size = NSSize(width: connected ? 36 : 24, height: 22)
+    let size = NSSize(width: connected ? 36 : 24, height: connected ? 24 : 22)
     let image = NSImage(size: size, flipped: false) { bounds in
       if connected {
-        NSColor.systemOrange.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 10, yRadius: 10).fill()
+        activityColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12).fill()
       }
       (connected ? NSColor.white : NSColor.labelColor).setStroke()
       let x = (size.width - 16) / 2
+      let y = (size.height - 22) / 2
       // An open side port, with an incoming arrow: distinct from a monitor.
       let port = NSBezierPath()
       port.lineWidth = 2
       port.lineCapStyle = .round
-      port.move(to: NSPoint(x: x + 9, y: 4))
-      port.line(to: NSPoint(x: x + 15, y: 4))
-      port.line(to: NSPoint(x: x + 15, y: 18))
-      port.line(to: NSPoint(x: x + 9, y: 18))
+      port.move(to: NSPoint(x: x + 9, y: y + 4))
+      port.line(to: NSPoint(x: x + 15, y: y + 4))
+      port.line(to: NSPoint(x: x + 15, y: y + 18))
+      port.line(to: NSPoint(x: x + 9, y: y + 18))
       port.stroke()
       let arrow = NSBezierPath()
       arrow.lineWidth = 2
       arrow.lineCapStyle = .round
       arrow.lineJoinStyle = .round
-      arrow.move(to: NSPoint(x: x, y: 11))
-      arrow.line(to: NSPoint(x: x + 10, y: 11))
-      arrow.move(to: NSPoint(x: x + 6, y: 7))
-      arrow.line(to: NSPoint(x: x + 10, y: 11))
-      arrow.line(to: NSPoint(x: x + 6, y: 15))
+      arrow.move(to: NSPoint(x: x, y: y + 11))
+      arrow.line(to: NSPoint(x: x + 10, y: y + 11))
+      arrow.move(to: NSPoint(x: x + 6, y: y + 7))
+      arrow.line(to: NSPoint(x: x + 10, y: y + 11))
+      arrow.line(to: NSPoint(x: x + 6, y: y + 15))
       arrow.stroke()
       return true
     }
     image.isTemplate = !connected
     return image
+  }
+}
+
+// Draw across the status button itself, avoiding NSStatusBarButton's image
+// padding and the nested capsule visible when the popover is selected. Mouse
+// handling and accessibility remain on the native button.
+final class SideportStatusArtwork: NSView {
+  var connected = false { didSet { needsDisplay = true } }
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+  override func draw(_ dirtyRect: NSRect) {
+    let image = SideportGlyph.image(connected: connected)
+    let size = NSSize(width: bounds.width, height: min(bounds.height, image.size.height))
+    image.draw(
+      in: NSRect(
+        x: 0, y: (bounds.height - size.height) / 2, width: size.width, height: size.height),
+      from: .zero, operation: .sourceOver, fraction: 1)
   }
 }
 

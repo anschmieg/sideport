@@ -12,7 +12,7 @@ import tempfile
 from signing import unlock
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 p = argparse.ArgumentParser()
 p.add_argument("--dependencies", type=pathlib.Path, required=True, help="Existing trusted Sideport work directory")
 p.add_argument("--tunnel-runtime", type=pathlib.Path, required=True, help="Verified official runtime-only tunnel release directory")

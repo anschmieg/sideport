@@ -14,7 +14,7 @@ Sideport is **computer use for remote agents**, implemented as a native macOS me
 
 ## UI and computer use
 
-Read [.impeccable.md](.impeccable.md) for design context. Use native macOS controls and semantic appearance. Distinguish connection availability from observed agent presence; never show an active pill merely because a tunnel is ready.
+Read [.impeccable.md](.impeccable.md) for design context. Use native macOS controls and semantic appearance. Distinguish connection availability from recent authenticated activity; never show an active pill merely because a tunnel is ready. Retained gateway session rows do not establish a live-agent count.
 
 Permission requests must explain action, reason, scope, duration and choices in ordinary language. Keep raw package arguments and policy diagnostics in optional details. Low-confidence command review still goes to the user; agent-provided reasons are untrusted input.
 

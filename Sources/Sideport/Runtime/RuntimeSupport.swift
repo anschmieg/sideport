@@ -207,11 +207,15 @@ final class RuntimeSupport {
         "com.apple.system.logger", "com.apple.logd", "com.apple.dnssd.service",
         "com.apple.networkd", "com.apple.SystemConfiguration.configd",
         "com.apple.trustd", "com.apple.trustd.agent",
+        // POSIX UID/name lookups (e.g. OpenSSH getpwuid). This is the
+        // Libinfo query service, not the OpenDirectory management API.
+        "com.apple.system.opendirectoryd.libinfo",
       ].map { "(allow mach-lookup (global-name \"" + $0 + "\"))" }
       + [
         "com.apple.windowserver.active", "com.apple.windowserver", "com.apple.WindowServer",
         "com.apple.coreservices.launchservicesd", "com.apple.tccd", "com.apple.axserver",
         "com.apple.xpc.launchd",
+        "com.apple.system.opendirectoryd.api", "com.apple.private.opendirectoryd.rpc",
         "com.apple.securityd", "com.apple.SecurityServer", "com.apple.securityd.xpc",
         "com.apple.replayd", "com.apple.replayd.capture",
         "com.apple.replaykit.sharingsession", "com.apple.replaykit.sharingsession.notification",

@@ -24,6 +24,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
       file: root.appendingPathComponent("work/remembered-locations.json"), controller: root.path)
   }
   var item: NSStatusItem!
+  let statusArtwork = SideportStatusArtwork()
   var status: NSMenuItem!
   let desktopIndicator = DesktopControlIndicator()
   var agentClients: [String] = []
@@ -76,6 +77,12 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     didSetUp = true
     NSApp.setActivationPolicy(.accessory)
     item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    if let button = item.button {
+      statusArtwork.frame = button.bounds
+      statusArtwork.autoresizingMask = [.width, .height]
+      statusArtwork.setAccessibilityElement(false)
+      button.addSubview(statusArtwork)
+    }
     let menu = NSMenu()
     status = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let header = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 340, height: 168))
@@ -104,6 +111,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     connectionState = NSTextField(labelWithString: "Off")
     connectionState.font = .systemFont(ofSize: 12)
     connectionState.textColor = .secondaryLabelColor
+    connectionState.lineBreakMode = .byTruncatingTail
     connectionState.frame = NSRect(x: 18, y: 51, width: 304, height: 18)
     header.addSubview(connectionState)
     connectionSwitch = NSSwitch(frame: NSRect(x: 278, y: 72, width: 44, height: 26))
@@ -278,19 +286,26 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   }
   func renderAgentPresence() {
     let connected = !agentClients.isEmpty && proxy?.isRunning == true && !stopping
-    item.button?.image = SideportGlyph.image(connected: connected)
+    item.length = connected ? 36 : 24
+    if let button = item.button { statusArtwork.frame = button.bounds }
+    item.button?.image = nil
+    statusArtwork.connected = connected
     item.button?.title = ""
     item.button?.setAccessibilityLabel(
-      connected ? "Sideport · remote agent connected" : "Sideport · no confirmed agent session")
+      connected
+        ? "Sideport · recent authenticated agent activity" : "Sideport · no recent agent activity")
     if !connected, status.title == "Connected — Mac access on" {
-      connectionState.stringValue = "Ready · no confirmed agent session"
+      connectionState.stringValue = "Ready · no recent agent activity"
     }
     if connected {
       connectionState.stringValue =
-        agentClients.count == 1
-        ? "Connected · " + agentClients[0] : "Connected · \(agentClients.count) agent sessions"
-      item.button?.toolTip = connectionState.stringValue
+        "Recent activity · " + agentClients.joined(separator: ", ")
+      connectionState.toolTip =
+        "Authenticated activity in the last two minutes. Client labels may represent multiple agents; connection counts are unavailable."
+    } else {
+      connectionState.toolTip = status.title
     }
+    item.button?.toolTip = connectionState.stringValue
   }
   func checkAgentActivity() {
     guard !stopping, proxy?.isRunning == true, let directory = approvalDirectory else {
@@ -304,7 +319,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     {
       let client =
         agentClients.count == 1
-        ? agentClients[0] : agentClients.isEmpty ? "Remote agent" : "Multiple remote agents"
+        ? agentClients[0] : agentClients.isEmpty ? "Remote agent" : "Multiple client labels"
       desktopIndicator.show(
         client: client, window: activity["window"] as? UInt32,
         screenWide: activity["screen_wide"] as? Bool == true,
@@ -459,7 +474,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   }
   @objc func about() {
     report(
-      "Early alpha · Version 0.3.2\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
+      "Early alpha · Version 0.3.3\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
     )
   }
   func launch(_ path: String, _ arguments: [String]) throws -> Process {

@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import pwd
 import urllib.request
 import urllib.error
 
@@ -118,6 +119,12 @@ try:
     assert broker.call("read_file", {"path": str(symlink)})["isError"]
     shell = content(broker.call("run_shell", {"cwd": str(project), "command": "printf shell-ok"}))
     assert shell["stdout"] == "shell-ok", shell
+    username = pwd.getpwuid(os.getuid()).pw_name
+    identity = content(broker.call("run_shell", {"cwd": str(project), "command": "/usr/bin/id -un"}))
+    assert identity["exit_code"] == 0 and identity["stdout"].strip() == username, "Sandbox cannot resolve the current UID: " + str(identity)
+    ssh_config = content(broker.call("run_shell", {"cwd": str(project), "command": "/usr/bin/ssh -G -F /dev/null sideport-test.invalid"}))
+    assert ssh_config["exit_code"] == 0 and ("user " + username) in ssh_config["stdout"], "OpenSSH UID lookup failed (configuration only, no connection): " + ssh_config["stderr"]
+    print("PASS: sandbox resolves the current UID and OpenSSH configuration without a network connection", flush=True)
     denied = broker.call("run_shell", {"cwd": str(project), "command": "cat " + str(sentinel)})
     assert denied.get("isError") and "SYNTHETIC-CONTROLLER-SENTINEL" not in json.dumps(denied)
     # A broad approved parent must not make the broker’s own executable writable.

@@ -17,9 +17,9 @@ Sideport is not an agent hosting platform, a new package manager or a substitute
 <table>
 <tr>
 <td><img src="docs/images/connection-off.png" width="340" alt="Sideport disconnected, with Allow connections switched off"></td>
-<td><img src="docs/images/connection-active.png" width="340" alt="Sideport showing a connected example agent"></td>
+<td><img src="docs/images/connection-active.png" width="340" alt="Sideport showing recent activity from an example agent"></td>
 </tr>
-<tr><td>Connections off</td><td>Agent connected</td></tr>
+<tr><td>Connections off</td><td>Agent activity</td></tr>
 </table>
 
 ## What it can do
@@ -30,7 +30,7 @@ Sideport is not an agent hosting platform, a new package manager or a substitute
 - **GitHub access:** use the Mac’s existing GitHub CLI login through a credential proxy, with local approval for operations classified as destructive or unknown.
 - **Additional MCP servers:** discover providers through MCPProxy, request exact-version npm servers, or forward existing agents-dev and Smithery connections after approval.
 
-An orange menu-bar pill indicates a confirmed agent session. During desktop use, Sideport outlines the selected window and shows a client/Stop pill without taking keyboard focus. **Stop disconnects Sideport, including file and shell access.**
+An orange menu-bar pill indicates authenticated agent activity within the last two minutes. The gateway retains session records, so Sideport groups recent activity by client label rather than claiming an exact number of connected agents. Idle clients can still reconnect while access is enabled. During desktop use, Sideport outlines the selected window and shows a client/Stop pill without taking keyboard focus. **Stop disconnects Sideport, including file and shell access.**
 
 <img src="docs/images/desktop-control.png" width="560" alt="Orange outline around a synthetic workspace window, with a Computer use and Stop pill">
 
@@ -46,7 +46,7 @@ Computer control is broader: it can operate apps beyond the file sandbox. Shell 
 
 ## Current status
 
-**Early alpha · Apple Silicon · macOS 15 or later.** The native 0.3.2 baseline has 21 regression groups, isolated integration checks, and controlled computer-use validation. It is ready for technical alpha testing, with the remaining gaps recorded in [status and limitations](docs/status.md).
+**Early alpha · Apple Silicon · macOS 15 or later.** The native baseline has 21 regression groups, isolated integration checks, and controlled computer-use validation. The 0.3.3 patch corrects activity accounting and shell UID lookup. It is ready for technical alpha testing, with the remaining gaps recorded in [status and limitations](docs/status.md).
 
 The source is public. Developer ID signing and notarized public builds are pending. The current **Check for updates** flow updates runtime dependencies; app replacement through an in-app updater is still being developed. Initial tunnel provisioning is also manual.
 

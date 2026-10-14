@@ -427,11 +427,14 @@ final class SecurityTests {
     assertNil((parsed["environment"] as? JSONObject)?["SIDEPORT_PRIVATE_TEST"])
   }
   func testAgentIndicators() throws {
-    let now = Date()
+    // RFC3339 formatting rounds fractional seconds; use a fixed integral clock
+    // so an observation cannot accidentally appear just ahead of the fixture.
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
     let iso = ISO8601DateFormatter()
     iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     let current: JSONObject = [
       "status": "active", "token_name": "mac-chatgpt-session", "start_time": iso.string(from: now),
+      "last_activity": iso.string(from: now),
       "client_name": "Claude",
     ]
     var stale = current
@@ -442,8 +445,30 @@ final class SecurityTests {
     admin["token_name"] = "admin"
     assertEqual(
       AgentPresence.clients(
-        ["data": ["sessions": [stale, closed, admin, current]]], since: now.addingTimeInterval(-1)),
+        ["data": ["sessions": [stale, closed, admin, current]]], since: now.addingTimeInterval(-1),
+        now: now),
       ["Claude"])
+    var idle = current
+    idle["start_time"] = iso.string(from: now.addingTimeInterval(-300))
+    idle["last_activity"] = iso.string(from: now.addingTimeInterval(-120))
+    var future = current
+    future["last_activity"] = iso.string(from: now.addingTimeInterval(1))
+    var malformed = current
+    malformed["last_activity"] = "not-a-date"
+    var unknown = current
+    unknown.removeValue(forKey: "last_activity")
+    var second = current
+    second["client_name"] = "Other client"
+    let repeated = Array(repeating: current, count: 20)
+    assertEqual(
+      AgentPresence.clients(
+        ["data": ["sessions": repeated + [idle, future, malformed, unknown, second]]],
+        since: now.addingTimeInterval(-600), now: now), ["Claude", "Other client"])
+    assertEqual(
+      AgentPresence.clients(
+        ["sessions": [current]], since: now.addingTimeInterval(-1),
+        now: now.addingTimeInterval(120)), [])
+    assertEqual(SideportGlyph.image(connected: true).size, NSSize(width: 36, height: 24))
     assertEqual(AgentPresence.clients([:], since: now), [])
     assertEqual(AgentPresence.name("\n\u{202E}Claude\t"), "Claude")
     assertEqual(AgentPresence.name(nil), "Remote agent")

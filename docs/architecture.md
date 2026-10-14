@@ -21,7 +21,9 @@ Computer tools run through the broker after a separate local approval. The wrapp
 
 MCPProxy discovers additional providers. Dynamic npm servers need an exact version, package audit and local approval; installation scripts are disabled and the running provider has no network access. Existing agents-dev and Smithery connections can be forwarded with their configured credentials after local approval. Node is optional and acquired on demand.
 
-Activity indicators use protected local state. The menu-bar pill follows current authenticated gateway sessions, rather than tunnel readiness. Desktop actions publish a unique action ID and wait for the tray’s matching visibility acknowledgement before proceeding. The overlay clears after eight seconds of inactivity, on disconnect or when its broker exits.
+Activity indicators use protected local state. The menu-bar pill follows authenticated gateway activity from the last two minutes, rather than tunnel readiness or a count of retained session rows. Repeated rows with the same displayed client label are grouped; this cannot identify distinct conversations sharing that label. Desktop actions publish a unique action ID and wait for the tray’s matching visibility acknowledgement before proceeding. The overlay clears after eight seconds of inactivity, on disconnect or when its broker exits.
+
+The shell's strict Mach-service allowlist includes the OpenDirectory Libinfo query endpoint for POSIX UID/name resolution. The separate directory-management API remains denied, alongside screen, Accessibility and Keychain services.
 
 ## Components
 

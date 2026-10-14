@@ -36,16 +36,18 @@ enum DocumentationPreview {
     }
     try png.write(to: path)
   }
-  static func connectionImage(_ header: NSView, connected: Bool) throws -> NSImage {
+  static func connectionImage(_ header: NSView, button: NSStatusBarButton) throws -> NSImage {
     let content = try snapshot(header)
+    let status = try snapshot(button)
     return NSImage(
       size: NSSize(width: content.size.width, height: content.size.height + 36), flipped: false
     ) { bounds in
       NSColor.windowBackgroundColor.setFill()
       bounds.fill()
       content.draw(at: .zero, from: .zero, operation: .sourceOver, fraction: 1)
-      SideportGlyph.image(connected: connected).draw(
-        at: NSPoint(x: bounds.maxX - 50, y: content.size.height + 7), from: .zero,
+      status.draw(
+        at: NSPoint(x: bounds.maxX - status.size.width - 16, y: content.size.height + 4),
+        from: .zero,
         operation: .sourceOver, fraction: 1)
       return true
     }
@@ -57,7 +59,9 @@ enum DocumentationPreview {
     let controller = ProxyController()
     controller.setUp()
     defer { NSStatusBar.system.removeStatusItem(controller.item) }
-    guard let header = controller.popover.contentViewController?.view else {
+    guard let header = controller.popover.contentViewController?.view,
+      let button = controller.item.button
+    else {
       throw SideportError("Sideport header is unavailable")
     }
     let panel = NSPanel(
@@ -66,13 +70,18 @@ enum DocumentationPreview {
     panel.contentView = header
     panel.appearance = NSApp.appearance
     try save(
-      connectionImage(header, connected: false),
+      connectionImage(header, button: button),
       to: destination.appendingPathComponent("connection-off.png"))
     controller.connectionSwitch.state = .on
-    controller.connectionState.stringValue = "Connected · Example agent"
+    controller.connectionState.stringValue = "Recent activity · Example agent"
+    controller.item.length = 36
+    controller.statusArtwork.frame = button.bounds
+    controller.statusArtwork.connected = true
+    button.highlight(true)
     try save(
-      connectionImage(header, connected: true),
+      connectionImage(header, button: button),
       to: destination.appendingPathComponent("connection-active.png"))
+    button.highlight(false)
     let dialog = ApprovalDialog(
       title: "Allow access to ~/Projects/demo?",
       reason: "Inspect and update this project's source files to resolve its build error.",
