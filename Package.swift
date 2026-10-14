@@ -13,5 +13,5 @@ let package = Package(
       dependencies: [
         .product(name: "PeekabooAutomationKit", package: "Peekaboo"),
         .product(name: "PeekabooProtocols", package: "Peekaboo"),
-      ], path: "Sources")
+      ], path: "Sources/Sideport")
   ], swiftLanguageModes: [.v5])

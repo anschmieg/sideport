@@ -1,38 +1,74 @@
 # Sideport
 
-Native macOS tray app and MCP broker for remote agents. Alpha 0.3.2.
+**Computer use for remote agents.**
 
-This release adds a distinct menu-bar icon, a pill for confirmed client sessions, and desktop-control outlines with a local Stop button. See [behaviour and validation](Docs/indicators-0.3.2.md).
+Sideport is a macOS menu-bar app that lets a remote MCP agent work on your Mac while you allow connections. It combines computer use, scoped file and shell tools, local approvals, and MCP-server discovery in one native app.
 
-**Release status: ready for alpha testing.** Detached-process cleanup passes adversarial tests. A controlled GUI test confirms working capture/input and refusal of screen/Accessibility access from sandboxed commands. See [the audit follow-up](Docs/native-followup-2026-10-13.md).
+Access starts off. You choose when the Mac becomes available, approve additional capabilities locally, and can stop access from the menu bar or the computer-control overlay.
 
-| Component | Implementation |
-|---|---|
-| Tray, approvals, broker, forwarding and update checks | Swift |
-| Computer use | Embedded PeekabooAutomationKit 4.9.1 |
-| Discovery and aggregation | MCPProxy core |
-| Connection | Official runtime-only OpenAI tunnel |
-| Execution policy | nono and DCG |
-| npm / Smithery runtime | Optional Node, acquired when needed |
+<table>
+<tr>
+<td><img src="docs/images/connection-off.png" width="340" alt="Sideport disconnected, with Allow connections switched off"></td>
+<td><img src="docs/images/connection-active.png" width="340" alt="Sideport showing a connected example agent"></td>
+</tr>
+<tr><td>Connections off</td><td>Agent connected</td></tr>
+</table>
 
-## Build and validate
+## What it can do
+
+- **Computer use:** observe windows, capture images, enter text, click controls, and drag between freshly resolved elements. Computer control requires its own approval.
+- **Files and shell:** read and write approved folders, run development commands, and request additional locations when needed. Shared toolchains and development caches are available to the shell.
+- **Command review:** screen flagged commands with DCG and an optional decision model. Uncertain decisions still go to you.
+- **GitHub access:** use the Mac’s existing GitHub CLI login through a credential proxy, with local approval for operations classified as destructive or unknown.
+- **Additional MCP servers:** discover providers through MCPProxy, request exact-version npm servers, or forward existing agents-dev and Smithery connections after approval.
+
+An orange menu-bar pill indicates a confirmed agent session. During desktop use, Sideport outlines the selected window and shows a client/Stop pill without taking keyboard focus. **Stop disconnects Sideport, including file and shell access.**
+
+<img src="docs/images/desktop-control.png" width="560" alt="Orange outline around a synthetic workspace window, with a Computer use and Stop pill">
+
+*The images show native Sideport UI rendered with synthetic documentation data, not live agent connections.*
+
+## Access and approvals
+
+File and shell tools run inside approved scopes. An agent can request another folder, but the decision appears on your Mac. You can remember that location for later connections and revoke it from **Remembered locations**.
+
+<img src="docs/images/folder-approval.png" width="440" alt="Folder approval showing why access is requested, what the agent can do, and Allow access or Don’t allow buttons">
+
+Computer control is broader: it can operate apps beyond the file sandbox. Shell commands have network access, and shared development caches are writable. These are deliberate compatibility choices; Sideport is not a virtual machine or a proof that arbitrary agent code is safe. See the [security boundaries](docs/security.md).
+
+## Current status
+
+**Early alpha · Apple Silicon · macOS 15 or later.** The native 0.3.2 baseline has 21 regression groups, isolated integration checks, and controlled computer-use validation. It is ready for technical alpha testing, with the remaining gaps recorded in [status and limitations](docs/status.md).
+
+The source is public. Developer ID signing and notarized public builds are pending. The current **Check for updates** flow updates runtime dependencies; app replacement through an in-app updater is still being developed. Initial tunnel provisioning is also manual.
+
+The packaged remote connection currently uses OpenAI’s Secure MCP Tunnel. ChatGPT is an example client; other clients need a compatible connection path. Sideport’s broker supports July 2026 MCP discovery alongside older-client fallback.
+
+## Build and try it
+
+You need macOS, an Apple Silicon Mac, and Swift 6.2 or later with Apple’s developer tools.
 
 ```sh
+git clone https://github.com/anschmieg/sideport.git
+cd sideport
 swift build --build-system native -c release
 .build/release/Sideport --regression-tests
-swift format lint --strict --recursive Sources Package.swift
 ```
 
-`Scripts/package.py --help` documents packaging inputs. It verifies the native runner, app signature, disconnected startup, sandbox, gateway credentials and tunnel interface before exporting a ZIP. Signing identity and runtime keys are external inputs and are never packaged.
+A source build can run regression checks and render the documentation UI. Running the full app also needs verified runtime dependencies and the one-time tunnel setup. The [development guide](docs/development.md) explains those inputs; the [user guide](docs/getting-started.md) explains everyday use with a configured installation.
 
-Release exports are blocked by `RELEASE_BLOCKERS.json` while an audit blocker is open. `--audit-only` can create a signed private test app without exporting a ZIP.
+## Repository map
 
-`Scripts/integration.py --help` documents isolated end-to-end checks. `--github` performs authenticated reads and a push dry-run; it does not change remote data. `--npm` tests an audited reference provider. The suite uses synthetic approvals in fresh private test state and never starts a tunnel.
+| Path | Contents |
+|---|---|
+| [`Sources/Sideport/`](Sources/Sideport/) | Native app, broker, computer use, permissions, providers and runtime supervision |
+| [`Resources/`](Resources/) | App icon, tool manifest and runtime configuration templates |
+| [`scripts/`](scripts/) | Packaging, integration checks and screenshot generation |
+| [`docs/`](docs/) | User and developer guides, architecture, screenshots and audit records |
+| [`Package.swift`](Package.swift) | Swift targets and dependency pins |
 
-GUI checks require `Scripts/gui_check.py --interactive` with the person present. They use a fixed audit-app path and an exclusive lock. Missing native permissions are checked without capture probes; requesting them requires the separate `--request-permissions` flag. Never loop new GUI builds unattended.
+The earlier JavaScript broker is preserved on the [`legacy-node` branch](https://github.com/anschmieg/sideport/tree/legacy-node). It is not part of the native app’s main source tree. Node is acquired only when an npm provider or Smithery integration needs it.
 
-Runtime-only dependency upgrades use release checksums and compatibility checks, with rollback on failure. The compiled automation library updates with a rebuilt app; its version and dependency graph are pinned in Package.swift and Package.resolved.
+## License
 
-The existing bundle identifier is retained for macOS permission continuity. Settings and remembered folder identities retain their existing format. The installed app and live tunnel are not modified by building or packaging.
-
-Legacy/0.2.2 preserves the source baseline for comparison.
+Sideport’s source is [MIT licensed](LICENSE). Third-party components retain their own licenses; packaging includes their notices.
