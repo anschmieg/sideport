@@ -15,6 +15,9 @@ import tempfile
 import time
 import uuid
 import pwd
+import concurrent.futures
+import datetime
+import http.server
 import urllib.request
 import urllib.error
 
@@ -125,6 +128,47 @@ try:
     ssh_config = content(broker.call("run_shell", {"cwd": str(project), "command": "/usr/bin/ssh -G -F /dev/null sideport-test.invalid"}))
     assert ssh_config["exit_code"] == 0 and ("user " + username) in ssh_config["stdout"], "OpenSSH UID lookup failed (configuration only, no connection): " + ssh_config["stderr"]
     print("PASS: sandbox resolves the current UID and OpenSSH configuration without a network connection", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(broker.call, "run_shell", {"cwd": str(project), "command": "sleep 2; printf receipt-ok"})
+        deadline = time.monotonic() + 5
+        while not list(session.glob("*.request.json")) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert list(session.glob("*.request.json")), "Executing shell request did not publish a live receipt"
+        assert content(running.result(timeout=10))["stdout"] == "receipt-ok"
+    assert not list(session.glob("*.request.json")), "Completed request left a live receipt"
+
+    health_state = {"active": 2, "mode": "valid", "redirect_followed": False}
+    class LiveHealth(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_): pass
+        def do_GET(self):
+            if self.path == "/trap":
+                health_state["redirect_followed"] = True
+                self.send_response(200); self.end_headers(); return
+            assert self.path == "/health/dispatcher"
+            if health_state["mode"] == "redirect":
+                self.send_response(302); self.send_header("Location", "/trap"); self.end_headers(); return
+            stamp = datetime.datetime.now(datetime.timezone.utc)
+            if health_state["mode"] == "stale": stamp -= datetime.timedelta(seconds=30)
+            body = json.dumps({"schema_version": 1, "component": "dispatcher", "status": "ok", "state": "accepting",
+                               "snapshot_at": stamp.isoformat(), "details": {"active": health_state["active"], "completed": 2000}}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+    health = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LiveHealth)
+    health_thread = threading.Thread(target=health.serve_forever, daemon=True)
+    health_thread.start()
+    try:
+        target = "http://127.0.0.1:" + str(health.server_port)
+        assert json.loads(run([str(exe), "--live-presence-check", target], env=env))["active_requests"] == 2
+        health_state["active"] = 0
+        assert json.loads(run([str(exe), "--live-presence-check", target], env=env))["active_requests"] == 0, "Presence lingered after current requests ended"
+        for mode in ["stale", "redirect"]:
+            health_state["mode"] = mode
+            rejected = subprocess.run([str(exe), "--live-presence-check", target], env=env, capture_output=True, text=True, timeout=10)
+            assert rejected.returncode != 0, "Unsafe health response accepted: " + mode
+        assert not health_state["redirect_followed"], "Live-health reader followed a redirect"
+    finally:
+        health.shutdown(); health.server_close(); health_thread.join(timeout=5)
+    print("PASS: live health clears immediately, rejects stale/redirected snapshots, and tool receipts end on completion", flush=True)
     denied = broker.call("run_shell", {"cwd": str(project), "command": "cat " + str(sentinel)})
     assert denied.get("isError") and "SYNTHETIC-CONTROLLER-SENTINEL" not in json.dumps(denied)
     # A broad approved parent must not make the broker’s own executable writable.

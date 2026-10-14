@@ -21,7 +21,13 @@ Computer tools run through the broker after a separate local approval. The wrapp
 
 MCPProxy discovers additional providers. Dynamic npm servers need an exact version, package audit and local approval; installation scripts are disabled and the running provider has no network access. Existing agents-dev and Smithery connections can be forwarded with their configured credentials after local approval. Node is optional and acquired on demand.
 
-Activity indicators use protected local state. The menu-bar pill follows authenticated gateway activity from the last two minutes, rather than tunnel readiness or a count of retained session rows. Repeated rows with the same displayed client label are grouped; this cannot identify distinct conversations sharing that label. Desktop actions publish a unique action ID and wait for the tray’s matching visibility acknowledgement before proceeding. The overlay clears after eight seconds of inactivity, on disconnect or when its broker exits.
+Activity indicators use the maintained tunnel runtime's `/health/dispatcher` live-operation count, sampled every half-second while connected. Idle polling, cumulative counters and retained gateway sessions do not activate the pill. The health reader accepts only its protected IPv4-loopback endpoint, refuses redirects and caching, and rejects malformed or stale snapshots. Unknown health is shown explicitly rather than filled in from history.
+
+The broker publishes a protected receipt for each executing tool and removes it on completion or failure. The tray checks the receipt's kernel process identity, so a dead or reused PID cannot leave an operating indicator. These receipts provide **Operating**; an in-flight tunnel operation provides **Connected**. This describes current request lifecycles, not a persistent conversation or the tunnel's cached local HTTP connection. Very short requests may complete between UI samples.
+
+The default local display label is ChatGPT. Another configured client can set `work/client-label.json` with a `label` string under Sideport's Application Support directory. Labels are not authenticated remote identities, and simultaneous conversations sharing the transport cannot be counted separately.
+
+Desktop actions publish a unique action ID and wait for the tray’s matching visibility acknowledgement before proceeding. The overlay clears after eight seconds of inactivity, on disconnect or when its broker exits. Its client pill uses the same configured label.
 
 The shell's strict Mach-service allowlist includes the OpenDirectory Libinfo query endpoint for POSIX UID/name resolution. The separate directory-management API remains denied, alongside screen, Accessibility and Keychain services.
 

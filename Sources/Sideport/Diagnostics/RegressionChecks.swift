@@ -432,44 +432,46 @@ final class SecurityTests {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     let iso = ISO8601DateFormatter()
     iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let current: JSONObject = [
-      "status": "active", "token_name": "mac-chatgpt-session", "start_time": iso.string(from: now),
-      "last_activity": iso.string(from: now),
-      "client_name": "Claude",
+    var snapshot: JSONObject = [
+      "schema_version": 1, "component": "dispatcher", "status": "ok", "state": "accepting",
+      "snapshot_at": iso.string(from: now), "details": ["active": 2, "completed": 900],
     ]
-    var stale = current
-    stale["start_time"] = iso.string(from: now.addingTimeInterval(-60))
-    var closed = current
-    closed["status"] = "closed"
-    var admin = current
-    admin["token_name"] = "admin"
+    assertEqual(try TunnelPresence.active(snapshot, now: now), 2)
+    snapshot["details"] = ["active": 0, "completed": 920]
+    assertEqual(try TunnelPresence.active(snapshot, now: now), 0)
+    assertRefused(try TunnelPresence.active(snapshot, now: now.addingTimeInterval(6)))
+    assertRefused(try TunnelPresence.active(snapshot, now: now.addingTimeInterval(-2)))
+    for invalid: Any in [true, -1, 0.5, "2", 10001] {
+      snapshot["details"] = ["active": invalid]
+      assertRefused(try TunnelPresence.active(snapshot, now: now))
+    }
+    assertRefused(try TunnelPresence.active(["data": ["sessions": []]], now: now))
     assertEqual(
-      AgentPresence.clients(
-        ["data": ["sessions": [stale, closed, admin, current]]], since: now.addingTimeInterval(-1),
-        now: now),
-      ["Claude"])
-    var idle = current
-    idle["start_time"] = iso.string(from: now.addingTimeInterval(-300))
-    idle["last_activity"] = iso.string(from: now.addingTimeInterval(-120))
-    var future = current
-    future["last_activity"] = iso.string(from: now.addingTimeInterval(1))
-    var malformed = current
-    malformed["last_activity"] = "not-a-date"
-    var unknown = current
-    unknown.removeValue(forKey: "last_activity")
-    var second = current
-    second["client_name"] = "Other client"
-    let repeated = Array(repeating: current, count: 20)
-    assertEqual(
-      AgentPresence.clients(
-        ["data": ["sessions": repeated + [idle, future, malformed, unknown, second]]],
-        since: now.addingTimeInterval(-600), now: now), ["Claude", "Other client"])
-    assertEqual(
-      AgentPresence.clients(
-        ["sessions": [current]], since: now.addingTimeInterval(-1),
-        now: now.addingTimeInterval(120)), [])
-    assertEqual(SideportGlyph.image(connected: true).size, NSSize(width: 36, height: 24))
-    assertEqual(AgentPresence.clients([:], since: now), [])
+      try TunnelPresence.endpoint("http://127.0.0.1:8080").path, "/health/dispatcher")
+    for endpoint in [
+      "https://example.com:80", "http://localhost:8080", "http://127.0.0.1:8080/api",
+      "http://user:secret@127.0.0.1:8080", "http://127.0.0.1:8080?token=secret",
+    ] {
+      assertRefused(try TunnelPresence.endpoint(endpoint))
+    }
+    let root = "/private/tmp/sideport-live-receipt-" + UUID().uuidString
+    let session = root + "/work/permission-sessions/test"
+    try directory(session)
+    defer { try? FileManager.default.removeItem(atPath: root) }
+    let context = try NativeContext(root: root, session: session)
+    let location = URL(fileURLWithPath: session)
+    assertFalse(AgentPresence.operating(in: location))
+    let receipt = try RequestActivity(context)
+    assertTrue(AgentPresence.operating(in: location))
+    var record = try jsonObject(Data(contentsOf: URL(fileURLWithPath: receipt.path)))
+    record["identity"] = [UInt32](repeating: 0, count: 8)
+    try privateWrite(record, receipt.path)
+    assertFalse(AgentPresence.operating(in: location))
+    receipt.finish()
+    assertFalse(AgentPresence.operating(in: location))
+    assertEqual(TunnelPresence.clientLabel(URL(fileURLWithPath: root)), "ChatGPT")
+    try privateWrite(["label": "Example client"], root + "/work/client-label.json")
+    assertEqual(TunnelPresence.clientLabel(URL(fileURLWithPath: root)), "Example client")
     assertEqual(AgentPresence.name("\n\u{202E}Claude\t"), "Claude")
     assertEqual(AgentPresence.name(nil), "Remote agent")
     let state: JSONObject = [

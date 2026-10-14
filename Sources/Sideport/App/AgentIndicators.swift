@@ -1,10 +1,9 @@
 import AppKit
 import Darwin
 
-// The gateway retains "active" records after stateless requests. These are
-// authenticated activity observations, not a count of connected agents.
+// Live tool receipts supplement the tunnel's current executing-operation
+// count. Neither uses retained gateway sessions or recent-activity timeouts.
 enum AgentPresence {
-  static let activityLifetime: TimeInterval = 120
   static func name(_ raw: String?) -> String {
     let cleaned = (raw ?? "").unicodeScalars.filter {
       !CharacterSet.controlCharacters.contains($0)
@@ -15,40 +14,29 @@ enum AgentPresence {
       in: .whitespacesAndNewlines)
     return value.isEmpty ? "Remote agent" : String(value.prefix(48))
   }
-  static func clients(_ response: JSONObject, since: Date, now: Date = Date()) -> [String] {
-    let data = response["data"] as? JSONObject ?? response
-    let rows = data["sessions"] as? [JSONObject] ?? []
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    func date(_ raw: String) -> Date? {
-      if let date = formatter.date(from: raw) { return date }
-      formatter.formatOptions = [.withInternetDateTime]
-      let date = formatter.date(from: raw)
-      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-      return date
-    }
-    var seen = Set<String>()
-    return rows.prefix(100).compactMap { row in
-      guard row["status"] as? String == "active",
-        row["token_name"] as? String == "mac-chatgpt-session",
-        let start = row["start_time"] as? String,
-        let activity = row["last_activity"] as? String
-      else { return nil }
-      guard let started = date(start), started >= since,
-        let lastActivity = date(activity), lastActivity >= started,
-        now.timeIntervalSince(lastActivity) >= 0,
-        now.timeIntervalSince(lastActivity) < activityLifetime
-      else { return nil }
-      let label = name(row["client_name"] as? String)
-      guard seen.insert(label).inserted else { return nil }
-      return label
+  static func ownedProcess(_ state: JSONObject) -> Bool {
+    guard let pid = state["pid"] as? Int32, pid > 1, kill(pid, 0) == 0,
+      let identity = state["identity"] as? [UInt32],
+      OwnedExecution.token(pid).map(OwnedExecution.values) == identity
+    else { return false }
+    return true
+  }
+  static func operating(in directory: URL) -> Bool {
+    guard
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil)
+    else { return false }
+    return files.filter { $0.lastPathComponent.hasSuffix(".request.json") }.prefix(128).contains {
+      guard let data = try? Data(contentsOf: $0), data.count <= 4096,
+        let state = try? jsonObject(data), state["kind"] as? String == "tool",
+        let id = state["id"] as? String, UUID(uuidString: id) != nil,
+        $0.lastPathComponent == id + ".request.json"
+      else { return false }
+      return ownedProcess(state)
     }
   }
   static func desktopActive(_ state: JSONObject, now: Date = Date()) -> Bool {
-    guard let pid = state["pid"] as? Int32, pid > 1, kill(pid, 0) == 0,
-      let identity = state["identity"] as? [UInt32],
-      OwnedExecution.token(pid).map(OwnedExecution.values) == identity,
-      let time = state["at"] as? Double
+    guard ownedProcess(state), let time = state["at"] as? Double
     else { return false }
     let age = now.timeIntervalSince1970 - time
     return age >= 0 && age < (state["busy"] as? Bool == true ? 310 : 8)
@@ -104,10 +92,11 @@ final class SideportStatusArtwork: NSView {
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
   override func draw(_ dirtyRect: NSRect) {
     let image = SideportGlyph.image(connected: connected)
-    let size = NSSize(width: bounds.width, height: min(bounds.height, image.size.height))
+    let size = NSSize(width: image.size.width, height: min(bounds.height, image.size.height))
     image.draw(
       in: NSRect(
-        x: 0, y: (bounds.height - size.height) / 2, width: size.width, height: size.height),
+        x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+        width: size.width, height: size.height),
       from: .zero, operation: .sourceOver, fraction: 1)
   }
 }

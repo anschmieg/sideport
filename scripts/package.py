@@ -12,7 +12,7 @@ import tempfile
 from signing import unlock
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 p = argparse.ArgumentParser()
 p.add_argument("--dependencies", type=pathlib.Path, required=True, help="Existing trusted Sideport work directory")
 p.add_argument("--tunnel-runtime", type=pathlib.Path, required=True, help="Verified official runtime-only tunnel release directory")
@@ -39,19 +39,24 @@ resources = contents / "Resources"
 (contents / "MacOS").mkdir(parents=True)
 resources.mkdir()
 shutil.copy2(REPO / ".build/release/Sideport", contents / "MacOS/Sideport")
-for asset in ["Sideport.icns", "Tools.json", "BuildLocations.json", "config-template.json", "Getting started.md"]:
-    shutil.copy2(REPO / "docs/getting-started.md" if asset == "Getting started.md" else REPO / "Resources" / asset, resources / asset)
+for asset in ["Sideport.icns", "Tools.json", "BuildLocations.json", "config-template.json", "Getting started.md", "connection-setup.md"]:
+    source = REPO / "docs/getting-started.md" if asset == "Getting started.md" else REPO / "docs/connection-setup.md" if asset == "connection-setup.md" else REPO / "Resources" / asset
+    shutil.copy2(source, resources / asset)
 work = resources / "Runtime/work"
 work.mkdir(parents=True)
 for directory, binary in [("mcpproxy-bin", "mcpproxy"), ("nono-bin", "nono"), ("permission-broker", "dcg")]:
     destination = work / directory
     destination.mkdir()
     source = args.dependencies / directory
+    if not any(item.is_file() and any(term in item.name.lower() for term in ["license", "notice", "copying"]) for item in source.iterdir()):
+        raise RuntimeError("Upstream runtime license/notice missing: " + directory)
     shutil.copy2(source / binary, destination / binary)
     for item in source.iterdir():
-        if item.is_file() and any(term in item.name.lower() for term in ["license", "notice", "spdx"]):
+        if item.is_file() and any(term in item.name.lower() for term in ["license", "notice", "copying", "spdx"]):
             shutil.copy2(item, destination / item.name)
 (work / "tunnel-client").mkdir()
+if not any(item.is_file() and "license" in item.name.lower() for item in args.tunnel_runtime.iterdir()):
+    raise RuntimeError("Official runtime-only tunnel license bundle missing")
 shutil.copy2(args.tunnel_runtime / "tunnel-client-runtime", work / "tunnel-client/tunnel-client")
 for item in args.tunnel_runtime.iterdir():
     if item.is_file() and item.name != "tunnel-client-runtime":
@@ -63,6 +68,7 @@ for metadata in ["mcpproxy-release.json", "nono-release.json", "tunnel-release.j
     shutil.copy2(source, work / metadata)
 licenses = resources / "Licenses"
 licenses.mkdir()
+shutil.copy2(REPO / "LICENSE", licenses / "Sideport.txt")
 for name in ["Peekaboo", "AXorcist", "Commander", "swift-log", "swift-algorithms", "swift-numerics"]:
     checkout = REPO / ".build/checkouts" / name
     candidates = [checkout / "LICENSE", checkout / "LICENSE.txt"]
@@ -71,7 +77,7 @@ for name in ["Peekaboo", "AXorcist", "Commander", "swift-log", "swift-algorithms
         shutil.copy2(source, licenses / (name + ".txt"))
 info = {"CFBundleName": "Sideport", "CFBundleDisplayName": "Sideport", "CFBundleExecutable": "Sideport",
         "CFBundleIdentifier": "local.adrian.mac-chatgpt.mcpproxy", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "12", "CFBundleIconFile": "Sideport",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": "14", "CFBundleIconFile": "Sideport",
         "LSUIElement": True, "LSMinimumSystemVersion": "15.0",
         "NSAppleEventsUsageDescription": "Sideport lets approved remote agents interact with apps on this Mac."}
 (contents / "Info.plist").write_bytes(plistlib.dumps(info))

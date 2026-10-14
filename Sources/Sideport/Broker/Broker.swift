@@ -30,6 +30,8 @@ actor NativeBroker {
     guard tools.contains(where: { $0["name"] as? String == name }) else {
       throw SideportError("Unknown tool")
     }
+    let activity = try RequestActivity(context)
+    defer { activity.finish() }
     switch name {
     case "allowed_locations": return textResult(try context.grants().map(\.dictionary))
     case "request_access":
@@ -138,14 +140,14 @@ actor NativeBroker {
       case "server/discover":
         result = [
           "supportedVersions": ["2026-07-28", "2025-11-25"],
-          "serverInfo": ["name": "Sideport", "version": "0.3.3"], "capabilities": ["tools": [:]],
+          "serverInfo": ["name": "Sideport", "version": "0.3.4"], "capabilities": ["tools": [:]],
         ]
       case "initialize":
         let requested = params["protocolVersion"] as? String ?? ""
         result = [
           "protocolVersion": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
             .contains(requested) ? requested : "2025-11-25",
-          "serverInfo": ["name": "Sideport", "version": "0.3.3"], "capabilities": ["tools": [:]],
+          "serverInfo": ["name": "Sideport", "version": "0.3.4"], "capabilities": ["tools": [:]],
         ]
       case "ping": result = [:]
       case "tools/list": result = ["tools": tools]

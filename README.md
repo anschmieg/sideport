@@ -17,7 +17,7 @@ Sideport is not an agent hosting platform, a new package manager or a substitute
 <table>
 <tr>
 <td><img src="docs/images/connection-off.png" width="340" alt="Sideport disconnected, with Allow connections switched off"></td>
-<td><img src="docs/images/connection-active.png" width="340" alt="Sideport showing recent activity from an example agent"></td>
+<td><img src="docs/images/connection-active.png" width="340" alt="Sideport operating for the configured ChatGPT connection"></td>
 </tr>
 <tr><td>Connections off</td><td>Agent activity</td></tr>
 </table>
@@ -30,7 +30,9 @@ Sideport is not an agent hosting platform, a new package manager or a substitute
 - **GitHub access:** use the Mac’s existing GitHub CLI login through a credential proxy, with local approval for operations classified as destructive or unknown.
 - **Additional MCP servers:** discover providers through MCPProxy, request exact-version npm servers, or forward existing agents-dev and Smithery connections after approval.
 
-An orange menu-bar pill indicates authenticated agent activity within the last two minutes. The gateway retains session records, so Sideport groups recent activity by client label rather than claiming an exact number of connected agents. Idle clients can still reconnect while access is enabled. During desktop use, Sideport outlines the selected window and shows a client/Stop pill without taking keyboard focus. **Stop disconnects Sideport, including file and shell access.**
+An orange menu-bar pill indicates a current request through the tunnel or an executing tool. The popover shows **Available**, **Connected · ChatGPT** while a remote request is in flight, or **Operating · ChatGPT** while a broker tool is running. It uses no recent-activity timeout and does not count retained gateway sessions as agents. Stateless clients can disconnect between requests while access remains available. The name is a configured connection label; it does not identify distinct conversations.
+
+During desktop use, Sideport outlines the selected window and shows a client/Stop pill without taking keyboard focus. **Stop disconnects Sideport, including file and shell access.**
 
 <img src="docs/images/desktop-control.png" width="560" alt="Orange outline around a synthetic workspace window, with a Computer use and Stop pill">
 
@@ -46,9 +48,9 @@ Computer control is broader: it can operate apps beyond the file sandbox. Shell 
 
 ## Current status
 
-**Early alpha · Apple Silicon · macOS 15 or later.** The native baseline has 21 regression groups, isolated integration checks, and controlled computer-use validation. The 0.3.3 patch corrects activity accounting and shell UID lookup. It is ready for technical alpha testing, with the remaining gaps recorded in [status and limitations](docs/status.md).
+**Early alpha · Apple Silicon · macOS 15 or later.** The native baseline has 21 regression groups, isolated integration checks, and controlled computer-use validation. The 0.3.4 alpha uses live request observation and retains the shell UID-lookup fix. See [status and limitations](docs/status.md) for the evidence and remaining gaps.
 
-The source is public. Developer ID signing and notarized public builds are pending. The current **Check for updates** flow updates runtime dependencies; app replacement through an in-app updater is still being developed. Initial tunnel provisioning is also manual.
+Download a technical-preview build from [GitHub Releases](https://github.com/anschmieg/sideport/releases). The zipped app uses a local self-signed identity; Developer ID signing and notarization are pending. Read the [installation and connection setup](docs/connection-setup.md) before trying it. Initial tunnel provisioning is manual, and the release contains no account credentials. **Check for updates** currently updates runtime dependencies; app self-updates are still unfinished.
 
 The packaged remote connection currently uses OpenAI’s Secure MCP Tunnel. ChatGPT is an example client; other clients need a compatible connection path. Sideport’s broker supports July 2026 MCP discovery alongside older-client fallback.
 

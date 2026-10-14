@@ -41,6 +41,14 @@ python3 scripts/integration.py --app /path/to/Sideport.app --dependencies /path/
 
 Optional flags add adversarial detached-process checks (`--audit-detach`), authenticated GitHub reads and a push dry-run (`--github`), and a version-pinned reference npm provider (`--npm`). `--download-runtime` checks fresh acquisition of the optional Node runtime. Use each script’s `--help` for the full interface.
 
+Validate the bundled tunnel's live-operation lifecycle against synthetic loopback control-plane and MCP servers:
+
+```sh
+python3 scripts/tunnel_presence.py --app /path/to/Sideport.app
+```
+
+This uses no real account key or installed connection. It holds one real forwarded request, observes a positive live count with the native health reader, releases the request and verifies a return to zero. Use it when updating the tunnel runtime or its presence contract.
+
 The computer-use audit requires a person at the Mac:
 
 ```sh
@@ -72,3 +80,5 @@ python3 scripts/package.py --help
 The script builds the app, runs the native checks, validates signatures, tests disconnected startup and sandbox compatibility, and checks the gateway and tunnel interfaces. It never packages account credentials or signing keys. The canonical bundled user guide is `docs/getting-started.md`.
 
 `docs/audits/release-readiness.json` can block release exports while an audit issue is open. `--audit-only` creates a private test app without exporting a ZIP. Developer ID distribution, notarization and app self-updates remain separate unfinished release work. Do not describe a locally signed audit build as a notarized public release.
+
+Each standalone runtime input must include its pinned upstream license or notice. Include provided SPDX manifests and the official runtime-only tunnel's matching `-licenses.txt` asset; verify release-asset digests when acquiring them. The packager refuses inputs without runtime notices and copies them into the app alongside the Swift dependency licenses and Sideport's MIT license. A managed installation's binary-only work directory may need these attribution inputs staged separately before packaging.

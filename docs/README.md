@@ -2,6 +2,7 @@
 
 - [Project goals and scope](project-scope.md): intended product, implementation boundaries and alpha acceptance criteria.
 - [Getting started](getting-started.md): using a configured installation, permissions and stopping access.
+- [Installation and connection setup](connection-setup.md): technical-preview downloads and manual first-run provisioning.
 - [Development](development.md): building, validation, packaging and UI fixtures.
 - [Architecture](architecture.md): components, source layout and request flow.
 - [Security boundaries](security.md): what approvals and sandboxes enforce, and what they do not.

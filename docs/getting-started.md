@@ -1,12 +1,14 @@
 # Sideport
 
-Computer use for remote agents. Early alpha 0.3.3 · Apple Silicon · macOS 15 or later.
+Computer use for remote agents. Early alpha 0.3.4 · Apple Silicon · macOS 15 or later.
+
+For a fresh download, read [installation and connection setup](connection-setup.md). App updates remain manual in this alpha.
 
 This configured alpha has passed isolated file, shell, provider, lifecycle and security checks, plus a controlled computer-use test. It remains an early alpha: live Smithery forwarding is unverified because the installed manager returns an error, and advanced file-picker handling has not had a live GUI test.
 
 - Open Sideport and turn on **Allow connections** to make the Mac available through your existing tunnel.
-- The menu-bar icon is an incoming arrow through an open port. An orange pill marks authenticated activity within the last two minutes; tunnel readiness alone does not color it. Retained session records are grouped by client label, not counted as agents. Handshake-only or idle clients may not show a pill even though access remains enabled.
-- Desktop tools show an orange, click-through outline and a small client/Stop pill before proceeding. The indicator stays for eight seconds between actions, follows the selected window, and uses the screen edge for desktop-wide or unresolved targets. Client names are reported labels, not authenticated identities or distinct conversation counts. With several recent client labels, the pill says Multiple client labels; it cannot determine which is acting. Stop disconnects all Sideport access, including running work.
+- The menu-bar icon is an incoming arrow through an open port. The orange pill marks a current request. **Connected · ChatGPT** means a tunnel request is in flight; **Operating · ChatGPT** means a tool is running. It clears when work ends, on the next half-second observation. **Available** means access is enabled without a confirmed current request. Stateless clients may disconnect between calls; there is no recent-activity grace period or agent count.
+- Desktop tools show an orange, click-through outline and a small client/Stop pill before proceeding. The indicator stays for eight seconds between desktop actions, follows the selected window, and uses the screen edge for desktop-wide or unresolved targets. ChatGPT is the configured connection label, not proof of an individual agent's identity. Stop disconnects all Sideport access, including running work.
 - Turn the switch off or quit Sideport to stop access. The app starts disconnected and launches no helper services while off.
 - File and shell tools use your approved folders and development caches. Additional locations require your local decision. **Remember this location** restores an approval when you reconnect.
 - Screen control needs a separate approval. It can interact with apps beyond the file sandbox; it expires when you disconnect. Grant macOS Accessibility, Screen Recording and event-input permissions to Sideport when requested. The app waits briefly for native requests; macOS may still require reconnecting to refresh a cached grant. Permission checks do not initiate screen-capture probes.

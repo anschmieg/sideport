@@ -23,6 +23,8 @@ Use `--audit-detach` when cleanup or execution containment changes. `--npm` and 
 
 If the verified inputs are unavailable, finish the checks that can run and report the integration gap. Do not borrow credentials, relax signatures or install new trust to make a test pass. Changes to the installed app or an active session require their own authorization.
 
+For tunnel or live-presence changes, `scripts/tunnel_presence.py --app ...` tests the actual packaged tunnel with synthetic local control-plane and MCP servers. It uses no real account credentials and verifies the native reader sees execution and then zero after completion.
+
 ## Controlled computer-use checks
 
 Use `scripts/gui_check.py --app ... --report ... --interactive` only with an agreed check and a person at the Mac. It uses a fixed disposable audit-app path and an exclusive lock. Default behavior checks existing permissions; `--request-permissions` is a separate, explicitly authorized step. Give the person time to respond to a native prompt. On denial, missing permission or an unexpected prompt, stop and report it rather than retrying captures.

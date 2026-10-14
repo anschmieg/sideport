@@ -211,7 +211,7 @@ final class RemotePeer: ToolPeer, @unchecked Sendable {
       params["_meta"] =
         [
           "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-          "io.modelcontextprotocol/clientInfo": ["name": "Sideport", "version": "0.3.3"],
+          "io.modelcontextprotocol/clientInfo": ["name": "Sideport", "version": "0.3.4"],
           "io.modelcontextprotocol/clientCapabilities": [:],
         ] as JSONObject
     }
@@ -236,7 +236,7 @@ final class RemotePeer: ToolPeer, @unchecked Sendable {
       "initialize",
       [
         "protocolVersion": "2025-11-25", "capabilities": [:],
-        "clientInfo": ["name": "Sideport", "version": "0.3.3"],
+        "clientInfo": ["name": "Sideport", "version": "0.3.4"],
       ], timeout: 30)
     guard let version = result["protocolVersion"] as? String,
       ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"].contains(version)

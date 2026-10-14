@@ -27,7 +27,8 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   let statusArtwork = SideportStatusArtwork()
   var status: NSMenuItem!
   let desktopIndicator = DesktopControlIndicator()
-  var agentClients: [String] = []
+  var liveRequestCount: Int?
+  var brokerOperating = false
   var presenceChecking = false
   var presenceCheckedAt = Date.distantPast
   var popover: NSPopover!
@@ -275,33 +276,40 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     connectionSwitch.isEnabled = !stopping && !updating
     connectionSwitch.setAccessibilityValue(ready ? "Ready" : off ? "Off" : text)
     if !active {
-      agentClients = []
+      liveRequestCount = nil
+      brokerOperating = false
       desktopIndicator.hide()
     }
     renderAgentPresence()
-    if agentClients.isEmpty { item.button?.toolTip = text }
     connectItem.isEnabled = proxy == nil && !stopping && !updating
     updateItem?.isEnabled = proxy == nil && !stopping && !updating
     disconnectItem.isEnabled = proxy != nil && !stopping
   }
   func renderAgentPresence() {
-    let connected = !agentClients.isEmpty && proxy?.isRunning == true && !stopping
-    item.length = connected ? 36 : 24
+    let connected =
+      proxy?.isRunning == true && !stopping
+      && (brokerOperating || (liveRequestCount ?? 0) > 0)
+    let label = TunnelPresence.clientLabel(root)
+    // Keep the menu-bar slot stable as stateless requests begin/end.
+    item.length = 36
     if let button = item.button { statusArtwork.frame = button.bounds }
     item.button?.image = nil
     statusArtwork.connected = connected
     item.button?.title = ""
     item.button?.setAccessibilityLabel(
       connected
-        ? "Sideport · recent authenticated agent activity" : "Sideport · no recent agent activity")
-    if !connected, status.title == "Connected — Mac access on" {
-      connectionState.stringValue = "Ready · no recent agent activity"
-    }
+        ? "Sideport · " + (brokerOperating ? "operating" : "connected") + " · " + label
+        : "Sideport · no active remote request")
     if connected {
-      connectionState.stringValue =
-        "Recent activity · " + agentClients.joined(separator: ", ")
+      connectionState.stringValue = (brokerOperating ? "Operating · " : "Connected · ") + label
       connectionState.toolTip =
-        "Authenticated activity in the last two minutes. Client labels may represent multiple agents; connection counts are unavailable."
+        "A request is currently in flight. The client name is a local connection label, not a count or verified identity of individual agents."
+    } else if status.title == "Connected — Mac access on" {
+      connectionState.stringValue =
+        liveRequestCount == nil
+        ? "Available · live status unavailable" : "Available · agents can connect"
+      connectionState.toolTip =
+        "Access is enabled. Stateless clients may disconnect between requests; no recent-activity timeout is used."
     } else {
       connectionState.toolTip = status.title
     }
@@ -317,9 +325,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
       data.count <= 4096, let activity = try? jsonObject(data),
       AgentPresence.desktopActive(activity)
     {
-      let client =
-        agentClients.count == 1
-        ? agentClients[0] : agentClients.isEmpty ? "Remote agent" : "Multiple client labels"
+      let client = TunnelPresence.clientLabel(root)
       desktopIndicator.show(
         client: client, window: activity["window"] as? UInt32,
         screenWide: activity["screen_wide"] as? Bool == true,
@@ -331,20 +337,23 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     } else {
       desktopIndicator.hide()
     }
-    guard !presenceChecking, Date().timeIntervalSince(presenceCheckedAt) >= 2,
-      let admin = try? GatewayAdmin(root.path)
+    brokerOperating = AgentPresence.operating(in: directory)
+    renderAgentPresence()
+    guard !presenceChecking, Date().timeIntervalSince(presenceCheckedAt) >= 0.5,
+      let tunnel = tunnel, tunnel.isRunning,
+      let raw = try? String(contentsOfFile: healthFile, encoding: .utf8)
     else { return }
     presenceChecking = true
     let gateway = proxy
-    let since = started
     Task {
-      let response = try? await admin.api(
-        "GET", "/api/v1/sessions?status=active&token=mac-chatgpt-session&limit=100")
+      let count = try? await TunnelPresence.read(
+        raw.trimmingCharacters(in: .whitespacesAndNewlines))
       await MainActor.run {
+        guard self.proxy === gateway, self.tunnel === tunnel, !self.stopping else { return }
         self.presenceChecking = false
-        guard self.proxy === gateway, !self.stopping else { return }
         self.presenceCheckedAt = Date()
-        self.agentClients = response.map { AgentPresence.clients($0, since: since) } ?? []
+        self.liveRequestCount = count
+        self.brokerOperating = AgentPresence.operating(in: directory)
         self.renderAgentPresence()
       }
     }
@@ -474,7 +483,7 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   }
   @objc func about() {
     report(
-      "Early alpha · Version 0.3.3\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
+      "Early alpha · Version 0.3.4\n\nComputer use for remote agents.\n\nAccess starts off. Active access ends when you disconnect. Remembered file locations return only when you reconnect; tool and computer-control approvals expire. Computer control can reach beyond approved folders.\n\nRuntime dependencies are bundled. Settings and remembered locations are stored in Application Support/Sideport. Getting started explains the supported tools and limitations."
     )
   }
   func launch(_ path: String, _ arguments: [String]) throws -> Process {
@@ -606,12 +615,14 @@ final class ProxyController: NSObject, NSApplicationDelegate {
         ])
       started = Date()
       update("Starting tools…", active: true)
-      timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+      timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
         self?.checkHealth()
       }
-      approvalTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+      RunLoop.main.add(timer!, forMode: .common)
+      approvalTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
         self?.checkPermissions()
       }
+      RunLoop.main.add(approvalTimer!, forMode: .common)
       checkHealth()
     } catch {
       stop("Disconnected — start failed")
@@ -1096,7 +1107,8 @@ final class ProxyController: NSObject, NSApplicationDelegate {
   func stop(_ message: String, completion: (() -> Void)? = nil) {
     guard !stopping else { return }
     stopping = true
-    agentClients = []
+    liveRequestCount = nil
+    brokerOperating = false
     desktopIndicator.hide()
     credentialLock.lock()
     credentialCancelled = true
@@ -1106,6 +1118,8 @@ final class ProxyController: NSObject, NSApplicationDelegate {
     timer = nil
     approvalTimer?.invalidate()
     approvalTimer = nil
+    presenceChecking = false
+    presenceCheckedAt = .distantPast
     if prompting { NSApp.abortModal() }
     update("Disconnecting…", active: false)
     let children = [tunnel, proxy].compactMap { $0 }

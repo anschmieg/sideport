@@ -73,7 +73,7 @@ enum DocumentationPreview {
       connectionImage(header, button: button),
       to: destination.appendingPathComponent("connection-off.png"))
     controller.connectionSwitch.state = .on
-    controller.connectionState.stringValue = "Recent activity · Example agent"
+    controller.connectionState.stringValue = "Operating · ChatGPT"
     controller.item.length = 36
     controller.statusArtwork.frame = button.bounds
     controller.statusArtwork.connected = true
