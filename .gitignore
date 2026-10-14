@@ -1,0 +1,9 @@
+node_modules/
+*.key
+*.keychain*
+*.p12
+*.app/
+*.zip
+.env
+.env.*
+.DS_Store
