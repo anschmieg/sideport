@@ -12,3 +12,7 @@ This branch preserves the 0.2.2 implementation: a Swift menu-bar app with a Java
 The legacy setup relied on separately provisioned runtimes, credentials and MCP servers. This is a source archive for comparison and migration, rather than a self-contained installer. Credentials, local configuration and signing keys are not included.
 
 The historical copy of the DCG executable is omitted from this branch's current tree. Obtain that dependency from its [official releases](https://github.com/Dicklesworthstone/destructive_command_guard/releases) if you need to reconstruct the old environment.
+
+## License
+
+Sideport’s source is [MIT licensed](LICENSE). Third-party dependencies retain their own licenses.
