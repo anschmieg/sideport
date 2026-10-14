@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sideport Validation"
+  short_description: "Validate Sideport without touching live access"
+  default_prompt: "Use $sideport-validation to select and run checks for this Sideport change without disturbing the installed app."

@@ -1,5 +1,7 @@
 # Development
 
+Start with the [project scope](project-scope.md) and [repository instructions](../AGENTS.md). The repo's [validation skill](../.agents/skills/sideport-validation/SKILL.md) covers safe check selection; [.impeccable.md](../.impeccable.md) records the design context. Current evidence and gaps belong in [status](status.md), rather than the product goals.
+
 ## Build
 
 Use an Apple Silicon Mac with Swift 6.2 or later and Apple’s developer tools. The app targets macOS 15 or later.

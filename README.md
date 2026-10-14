@@ -6,6 +6,14 @@ Sideport is a macOS menu-bar app that lets a remote MCP agent work on your Mac w
 
 Access starts off. You choose when the Mac becomes available, approve additional capabilities locally, and can stop access from the menu bar or the computer-control overlay.
 
+## Project direction
+
+Sideport provides the Mac's tools and local access controls; the connected client supplies the agent's planning and reasoning. The goal is a small, dependable utility that stays quiet while disconnected, supports ordinary desktop and development work, and acquires additional MCP tools only when a task needs them.
+
+After one-time setup, using it should mean enabling access, making understandable scope decisions, and stopping when finished. Settings and remembered folders should survive updates. Maintained upstream components and a small native core should keep that workflow working without an ongoing integration project.
+
+Sideport is not an agent hosting platform, a new package manager or a substitute for an isolated virtual machine. Tool extensibility must preserve local consent and protect the app's own policy and credentials. These are product goals; [current status](docs/status.md) describes the alpha's remaining gaps. The [project scope](docs/project-scope.md) defines the boundaries and acceptance criteria for further implementation.
+
 <table>
 <tr>
 <td><img src="docs/images/connection-off.png" width="340" alt="Sideport disconnected, with Allow connections switched off"></td>
@@ -65,6 +73,9 @@ A source build can run regression checks and render the documentation UI. Runnin
 | [`Resources/`](Resources/) | App icon, tool manifest and runtime configuration templates |
 | [`scripts/`](scripts/) | Packaging, integration checks and screenshot generation |
 | [`docs/`](docs/) | User and developer guides, architecture, screenshots and audit records |
+| [`AGENTS.md`](AGENTS.md) | Repository instructions and validation boundaries for coding agents |
+| [`.impeccable.md`](.impeccable.md) | Native macOS design context and interaction principles |
+| [`.agents/skills/`](.agents/skills/) | Focused repository validation skill |
 | [`Package.swift`](Package.swift) | Swift targets and dependency pins |
 
 The earlier JavaScript broker is preserved on the [`legacy-node` branch](https://github.com/anschmieg/sideport/tree/legacy-node). It is not part of the native app’s main source tree. Node is acquired only when an npm provider or Smithery integration needs it.
